@@ -2,6 +2,7 @@ import json
 import os
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 SITES = {
     "fb": ("facebook.com", ("c_user", "xs")),
@@ -14,7 +15,9 @@ class SessionError(ValueError):
 
 
 def site_of(url: str) -> str | None:
-    return next((site for site, (host, _) in SITES.items() if host in url), None)
+    hostname = urlparse(url).hostname or ""
+    return next((site for site, (host, _) in SITES.items() if hostname == host or hostname.endswith("." + host)),
+                None)
 
 
 def read_cookie_export(text: str) -> list[dict]:
@@ -92,9 +95,10 @@ class SessionStore:
             return "expired"
         return "in use" if (record.get("in_use_until") or 0) > self._clock() else "ready"
 
-    def mark_in_use(self, site: str, until: float) -> None:
+    def mark_in_use(self, site: str, seconds: float) -> None:
+        """Shown by `status`; kept on this store's own wall clock, not the caller's."""
         if record := self._read(site):
-            self._write(site, {**record, "in_use_until": until})
+            self._write(site, {**record, "in_use_until": self._clock() + seconds})
 
     def mark_expired(self, site: str) -> None:
         if record := self._read(site):

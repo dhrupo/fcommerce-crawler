@@ -146,7 +146,7 @@ class Transport:
 
     def _start_login(self, limiter: HostLimiter, site: str) -> None:
         limiter.login_until = self._clock() + self.login_seconds
-        self._sessions.mark_in_use(site, limiter.login_until)
+        self._sessions.mark_in_use(site, self.login_seconds)
         limiter.generation += 1
         limiter.last_report = "login"
 

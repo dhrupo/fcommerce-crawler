@@ -323,3 +323,12 @@ def test_parallel_block_reports_switch_once(tmp_path):
     assert t.report_block(FB, token) == "login"
     assert t.report_block(FB, token) == "login"
     assert sessions.state("fb") == "in use"
+
+
+def test_in_use_shows_with_real_clocks(tmp_path):
+    sessions = SessionStore(tmp_path)
+    sessions.import_export("fb", FB_COOKIES)
+    t = Transport(Config(places=("Sylhet",)), session_factory=lambda: RecordingSession(lambda *a: None),
+                  sessions=sessions)
+    t.report_block(FB)
+    assert sessions.state("fb") == "in use"

@@ -76,7 +76,7 @@ def test_in_use_until_shown_then_back_to_ready(tmp_path):
     now = [1000.0]
     store = SessionStore(tmp_path, clock=lambda: now[0])
     store.import_export("ig", JSON_EXPORT)
-    store.mark_in_use("ig", until=1900.0)
+    store.mark_in_use("ig", seconds=900.0)
     assert store.state("ig") == "in use"
     now[0] = 2000.0
     assert store.state("ig") == "ready"
@@ -95,3 +95,11 @@ def test_reimport_tightens_loose_permissions(tmp_path):
     path.chmod(0o644)
     store.import_export("fb", NETSCAPE)
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_site_comes_from_the_hostname():
+    from crawler.sessions import site_of
+
+    assert site_of("https://www.facebook.com/l.php?u=https://instagram.com/x") == "fb"
+    assert site_of("https://www.instagram.com/api/graphql") == "ig"
+    assert site_of("https://evil-facebook.com.example/") is None
