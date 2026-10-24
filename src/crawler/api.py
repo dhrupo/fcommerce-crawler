@@ -33,6 +33,8 @@ def parse_request(raw: bytes) -> tuple[dict | None, str | None]:
 
 def make_server(config: Config, store: Store, readers: dict, marketplace, port: int = 8765) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
+        timeout = 30
+
         def send_json(self, status, payload):
             data = json.dumps(payload).encode()
             self.send_response(status)
@@ -41,10 +43,30 @@ def make_server(config: Config, store: Store, readers: dict, marketplace, port: 
             self.end_headers()
             self.wfile.write(data)
 
+        def refusal(self) -> tuple[int, str] | None:
+            """Only same-machine JSON callers: a web page cannot send this without a preflight we never answer."""
+            port = self.server.server_address[1]
+            local = {f"127.0.0.1:{port}", f"localhost:{port}"}
+            if self.headers.get("host") not in local:
+                return 403, "host not allowed"
+            origin = self.headers.get("origin")
+            if origin is not None and origin.removeprefix("http://") not in local:
+                return 403, "origin not allowed"
+            if (self.headers.get("content-type") or "").split(";")[0].strip().lower() != "application/json":
+                return 415, "content-type must be application/json"
+            return None
+
         def do_POST(self):
             if self.path != "/search":
                 return self.send_json(404, {"error": "not found"})
-            length = int(self.headers.get("content-length") or 0)
+            if refused := self.refusal():
+                return self.send_json(refused[0], {"error": refused[1]})
+            try:
+                length = int(self.headers.get("content-length") or 0)
+            except ValueError:
+                length = -1
+            if length < 0:
+                return self.send_json(400, {"error": "bad content-length"})
             if length > MAX_BODY:
                 return self.send_json(413, {"error": "body too large"})
             fields, error = parse_request(self.rfile.read(length))

@@ -81,3 +81,60 @@ def test_bad_request_is_400_with_a_plain_message(server):
 def test_server_binds_to_localhost_only(server):
     url = server(Reader())
     assert url.startswith("http://127.0.0.1:")
+
+
+def raw_post(url, headers, body=b'{"place": "Sylhet", "category": "phones"}'):
+    import http.client
+    from urllib.parse import urlparse
+
+    u = urlparse(url)
+    conn = http.client.HTTPConnection(u.hostname, u.port, timeout=5)
+    conn.putrequest("POST", "/search", skip_host=True, skip_accept_encoding=True)
+    for name, value in headers.items():
+        conn.putheader(name, value)
+    conn.endheaders(body)
+    r = conn.getresponse()
+    return r.status, r.read()
+
+
+class CountingReader(Reader):
+    calls = 0
+
+    def posts(self, source, newest_seen):
+        CountingReader.calls += 1
+        return super().posts(source, newest_seen)
+
+
+def local_headers(url, **extra):
+    return {"Host": url.removeprefix("http://"), "Content-Type": "application/json", **extra}
+
+
+def test_cross_origin_text_plain_post_is_refused(server):
+    CountingReader.calls = 0
+    url = server(CountingReader())
+    status, _ = raw_post(url, {**local_headers(url), "Content-Type": "text/plain", "Content-Length": "41"})
+    assert status == 415 and CountingReader.calls == 0
+
+
+def test_foreign_host_is_refused(server):
+    CountingReader.calls = 0
+    url = server(CountingReader())
+    status, _ = raw_post(url, {**local_headers(url), "Host": "rebound.example:80", "Content-Length": "41"})
+    assert status == 403 and CountingReader.calls == 0
+
+
+def test_foreign_origin_is_refused_and_own_origin_allowed(server):
+    CountingReader.calls = 0
+    url = server(CountingReader())
+    status, _ = raw_post(url, {**local_headers(url), "Origin": "https://evil.example", "Content-Length": "41"})
+    assert status == 403 and CountingReader.calls == 0
+    status, _ = raw_post(url, {**local_headers(url), "Origin": url, "Content-Length": "41"})
+    assert status == 200 and CountingReader.calls == 1
+
+
+def test_bad_content_length_is_400(server):
+    url = server(Reader())
+    for value in ("-1", "abc"):
+        status, body = raw_post(url, {**local_headers(url), "Content-Length": value}, body=b"")
+        assert status == 400, value
+        assert json.loads(body)["error"] == "bad content-length"
