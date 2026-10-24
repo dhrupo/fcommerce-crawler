@@ -1,0 +1,28 @@
+[project]
+name = "fcommerce-crawler"
+version = "0.1.0"
+description = "On-demand, login-free reader for Facebook and Instagram seller posts"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["curl_cffi>=0.16"]
+
+[project.scripts]
+crawler = "crawler.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/crawler"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["live: hits real Facebook/Instagram; run with --live"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
