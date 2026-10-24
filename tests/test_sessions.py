@@ -87,3 +87,11 @@ def test_remove(tmp_path):
     store.import_export("fb", NETSCAPE)
     assert store.remove("fb") is True and store.state("fb") == "none"
     assert store.remove("fb") is False
+
+
+def test_reimport_tightens_loose_permissions(tmp_path):
+    store = SessionStore(tmp_path)
+    path = store.import_export("fb", NETSCAPE)
+    path.chmod(0o644)
+    store.import_export("fb", NETSCAPE)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
