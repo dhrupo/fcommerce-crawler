@@ -106,3 +106,23 @@ def parse_story(story: dict) -> dict:
 
 def parse_feed(text: str) -> list[dict]:
     return [parse_story(s) for s in find_stories(json_documents(text))]
+
+
+def page_info(docs, connection: tuple[str, ...]) -> dict:
+    """page_info for a connection, whether inline or sent as a deferred chunk."""
+    for doc in docs:
+        data = doc.get("data")
+        if list(doc.get("path") or []) == list(connection) and isinstance(data, dict) and "page_info" in data:
+            return data["page_info"] or {}
+        if "path" not in doc:
+            node = data
+            for key in connection:
+                node = node.get(key) if isinstance(node, dict) else None
+            if isinstance(node, dict) and isinstance(node.get("page_info"), dict):
+                return node["page_info"]
+    return {}
+
+
+def next_cursor(docs, connection: tuple[str, ...]) -> str | None:
+    info = page_info(docs, connection)
+    return info.get("end_cursor") if info.get("has_next_page") else None

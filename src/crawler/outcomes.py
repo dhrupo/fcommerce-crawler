@@ -1,4 +1,5 @@
 import json
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 
@@ -74,3 +75,10 @@ def classify(response, connection: tuple[str, ...] | None = None) -> Outcome:
     if found.get("edges") or streamed or "edges" not in found:
         return Outcome.OK
     return Outcome.NOTHING_NEW if has_page_info else Outcome.SCHEMA_CHANGED
+
+
+@dataclass
+class FetchResult:
+    outcome: Outcome
+    items: list = field(default_factory=list)
+    detail: str | None = None
