@@ -54,6 +54,14 @@ def ok(url=FB):
     return SimpleNamespace(status_code=200, text="{}", url=url)
 
 
+def spacing(t, clock, url):
+    """Seconds the limiter now waits between two requests to url (1 / rate)."""
+    t.post(url, data={})
+    start = clock.now
+    t.post(url, data={})
+    return clock.now - start
+
+
 def test_limiter_spaces_requests():
     t, _, clock = make()
     stamps = []
@@ -74,11 +82,11 @@ def test_jitter_stays_within_twenty_percent():
 
 
 def test_rate_halves_on_drop():
-    t, session, _ = make([CurlConnectionError("reset"), ok()])
+    t, session, clock = make([CurlConnectionError("reset"), ok()])
     r = t.post(FB, data={})
     assert r.status_code == 200
     assert len(session.calls) == 2
-    assert t.rate_for(FB) == pytest.approx(1.0)
+    assert spacing(t, clock, FB) == pytest.approx(1.0)
 
 
 def test_second_drop_is_raised_not_retried_again():
@@ -89,11 +97,10 @@ def test_second_drop_is_raised_not_retried_again():
 
 
 def test_hosts_have_separate_limiters():
-    t, _, _ = make([CurlConnectionError("reset"), ok(), ok(IG)])
+    t, _, clock = make([CurlConnectionError("reset"), ok()])
     t.post(FB, data={})
-    t.post(IG, data={})
-    assert t.rate_for(FB) == pytest.approx(1.0)
-    assert t.rate_for(IG) == pytest.approx(2.0)
+    assert spacing(t, clock, IG) == pytest.approx(0.5)
+    assert spacing(t, clock, FB) == pytest.approx(1.0)
 
 
 def test_blocked_host_cools_down():
@@ -127,11 +134,10 @@ def test_429_is_not_retried():
 
 
 def test_rate_recovers_slowly_after_drop():
-    t, _, _ = make([CurlConnectionError("reset")])
+    t, _, clock = make([CurlConnectionError("reset")])
     t.post(FB, data={})  # dropped, then the retry is success 1
-    assert t.rate_for(FB) == pytest.approx(1.0)
-    for _ in range(t.recovery_after - 2):
+    for _ in range(t.recovery_after - 4):
         t.post(FB, data={})
-    assert t.rate_for(FB) == pytest.approx(1.0)
-    t.post(FB, data={})
-    assert 1.0 < t.rate_for(FB) <= 2.0
+    assert spacing(t, clock, FB) == pytest.approx(1.0)  # successes 18 and 19
+    t.post(FB, data={})  # success 20 speeds up the slots booked after it
+    assert 0.5 <= spacing(t, clock, FB) < 1.0

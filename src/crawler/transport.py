@@ -64,9 +64,6 @@ class Transport:
     def post(self, url: str, **kwargs):
         return self.request("POST", url, **kwargs)
 
-    def rate_for(self, url: str) -> float:
-        return self._limiter(url).rate
-
     def mark_blocked(self, url: str) -> None:
         limiter = self._limiter(url)
         with limiter.lock:
