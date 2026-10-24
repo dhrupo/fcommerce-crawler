@@ -64,25 +64,16 @@ def crossed_boundary(is_fresh: list[bool]) -> bool:
     return False in is_fresh[is_fresh.index(True):]
 
 
-def fetch_page_posts(transport, config: Config, page_id: str, *, newest_seen=None, now=time.time,
-                     on_raw=None, max_pages=MAX_PAGES) -> FetchResult:
-    """Newest-first timeline, back to 60 days ago or to the newest post already stored."""
-    stop_before = now() - HISTORY_DAYS * 86400
-    if newest_seen:
-        stop_before = max(stop_before, newest_seen)
-    friendly = "ProfileCometTimelineFeedRefetchQuery"
-    head = headers(f"https://www.facebook.com/profile.php?id={page_id}", friendly)
+def fetch_feed(transport, *, doc_id: str, friendly: str, referer: str, connection: tuple[str, ...], label: str,
+               variables_for, stop_before: float, newest_first: bool, on_raw=None, max_pages=MAX_PAGES) -> FetchResult:
+    """Page through a story feed, keeping posts newer than stop_before."""
+    head = headers(referer, friendly)
     items, cursor = [], None
-
     for page_number in range(1, max_pages + 1):
-        variables = {"afterTime": None, "beforeTime": None, "count": 3, "cursor": cursor,
-                     "feedLocation": "TIMELINE", "renderLocation": "timeline", "scale": 2, "id": page_id,
-                     **RELAY_FLAGS}
-        response = transport.post(GRAPHQL_URL, data=graphql_form(config.doc_ids["fb_timeline"], friendly, variables),
-                                  headers=head)
+        response = transport.post(GRAPHQL_URL, data=graphql_form(doc_id, friendly, variables_for(cursor)), headers=head)
         if on_raw:
-            on_raw("timeline", response.text)
-        outcome = classify(response, CONNECTION)
+            on_raw(label, response.text)
+        outcome = classify(response, connection)
         if outcome is Outcome.NOTHING_NEW:
             break
         if outcome is not Outcome.OK:
@@ -92,8 +83,25 @@ def fetch_page_posts(transport, config: Config, page_id: str, *, newest_seen=Non
         posts = [parse_story(s) for s in find_stories(docs)]
         is_fresh = [p["created_at"] is None or p["created_at"] > stop_before for p in posts]
         items += [p for p, fresh in zip(posts, is_fresh, strict=True) if fresh]
-        cursor = next_cursor(docs, CONNECTION)
-        if not cursor or crossed_boundary(is_fresh):
+        cursor = next_cursor(docs, connection)
+        if not cursor or (newest_first and crossed_boundary(is_fresh)):
             break
-
     return FetchResult(Outcome.OK if items else Outcome.NOTHING_NEW, items)
+
+
+def history_start(now: float, newest_seen: float | None) -> float:
+    return max(now - HISTORY_DAYS * 86400, newest_seen or 0)
+
+
+def fetch_page_posts(transport, config: Config, page_id: str, *, newest_seen=None, now=time.time,
+                     on_raw=None, max_pages=MAX_PAGES) -> FetchResult:
+    """Newest-first timeline, back to 60 days ago or to the newest post already stored."""
+    def variables_for(cursor):
+        return {"afterTime": None, "beforeTime": None, "count": 3, "cursor": cursor, "feedLocation": "TIMELINE",
+                "renderLocation": "timeline", "scale": 2, "id": page_id, **RELAY_FLAGS}
+
+    return fetch_feed(
+        transport, doc_id=config.doc_ids["fb_timeline"], friendly="ProfileCometTimelineFeedRefetchQuery",
+        referer=f"https://www.facebook.com/profile.php?id={page_id}", connection=CONNECTION, label="timeline",
+        variables_for=variables_for, stop_before=history_start(now(), newest_seen), newest_first=True,
+        on_raw=on_raw, max_pages=max_pages)
