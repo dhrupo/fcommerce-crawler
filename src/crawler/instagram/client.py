@@ -5,6 +5,7 @@ import time
 from ..config import Config
 from ..facebook.pages import crossed_boundary, history_start
 from ..outcomes import FetchResult, Outcome, classify, json_documents
+from ..transport import HostBlocked
 
 GRAPHQL_URL = "https://www.instagram.com/api/graphql"
 APP_ID = "936619743392459"
@@ -101,8 +102,11 @@ class InstagramClient:
                          "__relay_internal__pv__PolarisShortDramaEnabledrelayprovider": False}
             if cursor:
                 variables.update(after=cursor, first=12)
-            outcome, docs = self._ask("ig_profile_posts", "PolarisProfilePostsQuery", variables,
-                                      f"https://www.instagram.com/{self.username}/", POSTS, "ig-posts")
+            try:
+                outcome, docs = self._ask("ig_profile_posts", "PolarisProfilePostsQuery", variables,
+                                          f"https://www.instagram.com/{self.username}/", POSTS, "ig-posts")
+            except HostBlocked:
+                return FetchResult(Outcome.BLOCKED, items, f"instagram {self.username}: host is cooling down")
             if outcome is Outcome.NOTHING_NEW:
                 break
             if outcome is not Outcome.OK:

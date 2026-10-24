@@ -94,7 +94,6 @@ class _SourceJob:
 
     def save_posts(self, result: FetchResult):
         strategy, now = self.reader.strategy, self.now()
-        before = {p["item_id"]: self.store.stored_comment_count(self.source.id, p["item_id"]) for p in result.items}
         changes = {p["item_id"]: self.store.upsert_item(self.source.id, p) for p in result.items}
         complete = result.outcome in FETCHED
         # Only a complete read may move "last seen"; after a partial one the older posts are still missing.
@@ -105,8 +104,8 @@ class _SourceJob:
             self.event("comments", result.outcome, self.stored_comments(strategy, now), result.detail, True)
             return
 
-        grew = [p for p in result.items
-                if p.get("comment_count") is None or p["comment_count"] > (before.get(p["item_id"]) or 0)]
+        grew = [p for p in result.items if p.get("comment_count") is None
+                or p["comment_count"] > (self.store.comments_read_count(self.source.id, p["item_id"]) or 0)]
         outcome, detail = Outcome.NOTHING_NEW, None
         for post in grew:
             try:
@@ -119,6 +118,8 @@ class _SourceJob:
                 outcome, detail = Outcome.CRASH, "reading comments failed; see the crawler log"
                 continue
             self.store.upsert_comments(self.source.id, post["item_id"], got.items)
+            if got.outcome in FETCHED:
+                self.store.set_comments_read(self.source.id, post["item_id"], post.get("comment_count"))
             if got.outcome not in FETCHED:
                 outcome, detail = got.outcome, got.detail
                 if got.outcome is Outcome.BLOCKED:
@@ -247,16 +248,17 @@ class InstagramReader(_Reader):
         self._clients: dict[int, InstagramClient] = {}
         self._lock = threading.Lock()
 
-    def client(self, source) -> InstagramClient:
+    def client(self, source, fresh=False) -> InstagramClient:
+        """A new client per read: its token belongs to the session of the thread doing that read."""
         with self._lock:
-            if source.id not in self._clients:
+            if fresh or source.id not in self._clients:
                 username = urlparse(source.url).path.strip("/").split("/")[0]
                 self._clients[source.id] = InstagramClient(self.transport, self.config, username, self.now,
                                                            self.raw(source))
             return self._clients[source.id]
 
     def posts(self, source, newest_seen):
-        return self.checked(source, self.client(source).fetch_posts(newest_seen))
+        return self.checked(source, self.client(source, fresh=True).fetch_posts(newest_seen))
 
     def owner_for(self, source, post):
         return self.client(source).owner_id

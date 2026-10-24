@@ -3,6 +3,7 @@ import time
 
 from ..config import Config
 from ..outcomes import FetchResult, Outcome, classify, json_documents
+from ..transport import HostBlocked
 from .parse import find_stories, next_cursor, parse_story
 
 GRAPHQL_URL = "https://www.facebook.com/api/graphql/"
@@ -10,6 +11,7 @@ TRANSIENT_CODES = {1675012}
 TRIES = 3
 CONNECTION = ("node", "timeline_list_feed_units")
 HISTORY_DAYS = 60
+REFRESH_DAYS = 7
 MAX_PAGES = 200
 RELAY_FLAGS = {
     "__relay_internal__pv__GHLShouldChangeAdIdFieldNamerelayprovider": True,
@@ -91,8 +93,11 @@ def fetch_feed(transport, *, doc_id: str, friendly: str, referer: str, connectio
     head = headers(referer, friendly)
     items, cursor = [], None
     for page_number in range(1, max_pages + 1):
-        outcome, response = ask_graphql(transport, graphql_form(doc_id, friendly, variables_for(cursor)), head,
-                                        connection, label, on_raw)
+        try:
+            outcome, response = ask_graphql(transport, graphql_form(doc_id, friendly, variables_for(cursor)), head,
+                                            connection, label, on_raw)
+        except HostBlocked:
+            return FetchResult(Outcome.BLOCKED, items, f"page {page_number}: host is cooling down after a block")
         if outcome is Outcome.NOTHING_NEW:
             break
         if outcome is not Outcome.OK:
@@ -111,7 +116,10 @@ def fetch_feed(transport, *, doc_id: str, friendly: str, referer: str, connectio
 
 
 def history_start(now: float, newest_seen: float | None) -> float:
-    return max(now - HISTORY_DAYS * 86400, newest_seen or 0)
+    """Oldest post time to read: 60 days, or since the last post seen but always re-reading the last 7 days."""
+    if newest_seen is None:
+        return now - HISTORY_DAYS * 86400
+    return max(now - HISTORY_DAYS * 86400, min(newest_seen, now - REFRESH_DAYS * 86400))
 
 
 def fetch_page_posts(transport, config: Config, page_id: str, *, newest_seen=None, now=time.time,

@@ -126,3 +126,18 @@ def page_info(docs, connection: tuple[str, ...]) -> dict:
 def next_cursor(docs, connection: tuple[str, ...]) -> str | None:
     info = page_info(docs, connection)
     return info.get("end_cursor") if info.get("has_next_page") else None
+
+
+def connection_nodes(docs, connection: tuple[str, ...]) -> list[dict]:
+    """Edge nodes of a connection, inline in the first reply or streamed as separate chunks."""
+    nodes = []
+    for doc in docs:
+        data = doc.get("data")
+        path = list(doc.get("path") or [])
+        if not path:
+            for key in connection:
+                data = data.get(key) if isinstance(data, dict) else None
+            nodes += [e.get("node") or {} for e in (data or {}).get("edges") or [] if isinstance(e, dict)]
+        elif path[: len(connection) + 1] == [*connection, "edges"] and len(path) == len(connection) + 2:
+            nodes.append((data or {}).get("node") or {})
+    return nodes

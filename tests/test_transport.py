@@ -141,3 +141,18 @@ def test_rate_recovers_slowly_after_drop():
     assert spacing(t, clock, FB) == pytest.approx(1.0)  # successes 18 and 19
     t.post(FB, data={})  # success 20 speeds up the slots booked after it
     assert 0.5 <= spacing(t, clock, FB) < 1.0
+
+
+def test_cooldown_started_while_waiting_stops_the_request():
+    t, session, clock = make()
+    t.post(FB, data={})
+    real_sleep = clock.sleep
+
+    def sleep_then_block(seconds):
+        real_sleep(seconds)
+        t.mark_blocked(FB)
+
+    t._sleep = sleep_then_block
+    with pytest.raises(HostBlocked):
+        t.post(FB, data={})
+    assert len(session.calls) == 1

@@ -105,6 +105,9 @@ class Transport:
             limiter.next_at = slot + (1 / limiter.rate) * self._jitter(0.8, 1.2)
         if slot > now:
             self._sleep(slot - now)
+            with limiter.lock:
+                if self._clock() < limiter.blocked_until:
+                    raise HostBlocked(host_key(url), limiter.blocked_until)
 
     def _back_off(self, limiter: HostLimiter) -> None:
         limiter.rate = max(MIN_RATE, limiter.rate / 2)

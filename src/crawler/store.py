@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS comments (
     source_id INTEGER NOT NULL, item_id TEXT NOT NULL, comment_id TEXT NOT NULL, created_at REAL,
     data TEXT NOT NULL, PRIMARY KEY (source_id, comment_id));
 CREATE INDEX IF NOT EXISTS comments_by_item ON comments (source_id, item_id);
+CREATE TABLE IF NOT EXISTS comment_reads (
+    source_id INTEGER NOT NULL, item_id TEXT NOT NULL, comment_count INTEGER, PRIMARY KEY (source_id, item_id));
 CREATE TABLE IF NOT EXISTS fetch_state (
     source_id INTEGER PRIMARY KEY, last_outcome TEXT NOT NULL, attempted_at REAL NOT NULL,
     fetched_at REAL, newest_created_at REAL, detail TEXT);
@@ -109,7 +111,15 @@ class Store:
         return [Source(**{k: r[k] for k in Source.__annotations__}) for r in rows]
 
     def remove_source(self, url) -> bool:
-        return self._write("DELETE FROM sources WHERE url = ?", (url,)).rowcount > 0
+        """Delete the source and everything read from it, so a later source reusing the id starts empty."""
+        with self._lock, self._db:
+            row = self._db.execute("SELECT id FROM sources WHERE url = ?", (url,)).fetchone()
+            if row is None:
+                return False
+            for table in ("items", "comments", "comment_reads", "fetch_state"):
+                self._db.execute(f"DELETE FROM {table} WHERE source_id = ?", (row["id"],))
+            self._db.execute("DELETE FROM sources WHERE id = ?", (row["id"],))
+        return True
 
     def upsert_item(self, source_id, item: dict) -> dict:
         """Store a post or listing; report whether it is new, edited, or flipped sold/available."""
@@ -152,8 +162,16 @@ class Store:
         rows = self._read("SELECT data FROM items WHERE source_id = ? AND item_id = ?", (source_id, item_id))
         return json.loads(rows[0]["data"]) if rows else None
 
-    def stored_comment_count(self, source_id, item_id) -> int | None:
-        return (self.get_item(source_id, item_id) or {}).get("comment_count")
+    def comments_read_count(self, source_id, item_id) -> int | None:
+        """The post's comment count at its last complete comment read."""
+        rows = self._read("SELECT comment_count FROM comment_reads WHERE source_id = ? AND item_id = ?",
+                          (source_id, item_id))
+        return rows[0]["comment_count"] if rows else None
+
+    def set_comments_read(self, source_id, item_id, comment_count) -> None:
+        self._write("INSERT INTO comment_reads (source_id, item_id, comment_count) VALUES (?,?,?) "
+                    "ON CONFLICT(source_id, item_id) DO UPDATE SET comment_count=excluded.comment_count",
+                    (source_id, item_id, comment_count))
 
     def upsert_comments(self, source_id, item_id, comments: list[dict]) -> None:
         with self._lock, self._db:

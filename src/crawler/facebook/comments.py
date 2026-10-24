@@ -2,8 +2,9 @@ import base64
 
 from ..config import Config
 from ..outcomes import FetchResult, Outcome, json_documents
+from ..transport import HostBlocked
 from .pages import ask_graphql, graphql_form, headers
-from .parse import next_cursor
+from .parse import connection_nodes, next_cursor
 
 COMMENTS = ("node", "comment_rendering_instance_for_feed_location", "comments")
 REPLIES = ("node", "replies_connection")
@@ -67,11 +68,7 @@ class _Walker:
         return outcome, docs
 
     def _take(self, docs, connection, parent_id) -> Outcome:
-        conn = docs[0].get("data")
-        for key in connection:
-            conn = (conn or {}).get(key)
-        for edge in conn.get("edges") or []:
-            node = edge.get("node") or {}
+        for node in connection_nodes(docs, connection):
             comment = parse_comment(node, self.item_id, self.owner_id, parent_id)
             self.items.append(comment)
             if handle := _reply_handle(node):
@@ -118,6 +115,9 @@ def fetch_comments(transport, config: Config, post: dict, owner_id: str | None, 
     """All comments of a post, oldest first, with every reply level. owner_id marks the seller's own replies."""
     walker = _Walker(transport, config, post["item_id"], owner_id, on_raw)
     feedback_id = post.get("feedback_id") or base64.b64encode(f"feedback:{post['item_id']}".encode()).decode()
-    outcome = walker.comments(feedback_id)
+    try:
+        outcome = walker.comments(feedback_id)
+    except HostBlocked:
+        outcome = Outcome.BLOCKED
     detail = None if outcome is Outcome.OK else f"comments of {post['item_id']}: {outcome}"
     return FetchResult(outcome, walker.items, detail)

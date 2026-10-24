@@ -36,3 +36,8 @@ def test_config_overrides_one_doc_id_and_keeps_the_rest(tmp_path):
     cfg = load_config(write(tmp_path, 'places = ["Sylhet"]\n[doc_ids]\nfb_comments = "1"\n'))
     assert cfg.doc_ids["fb_comments"] == "1"
     assert cfg.doc_ids["fb_replies"] == "26570577339199586"
+
+
+def test_rejects_non_positive_rate(tmp_path):
+    with pytest.raises(ConfigError, match="per_second"):
+        load_config(write(tmp_path, 'places = ["Sylhet"]\n[rates]\nper_second = 0\n'))

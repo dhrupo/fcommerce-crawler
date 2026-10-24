@@ -76,3 +76,15 @@ def test_failed_fetch_keeps_last_good_time(tmp_path):
     s.set_fetch_state(src.id, "blocked")
     st = s.fetch_state(src.id)
     assert (st.last_outcome, st.attempted_at, st.fetched_at, st.newest_created_at) == ("blocked", 200.0, 100.0, 90)
+
+
+def test_remove_source_deletes_its_rows(tmp_path):
+    s = Store(tmp_path)
+    a = s.add_source("https://www.facebook.com/a", "fb_page", "Sylhet", "phones")
+    s.upsert_item(a.id, post())
+    s.upsert_comments(a.id, "p1", [{"comment_id": "c1", "created_at": 1}])
+    s.set_fetch_state(a.id, "ok", newest_created_at=5)
+    s.remove_source(a.url)
+    b = s.add_source("https://www.facebook.com/b", "fb_page", "Sylhet", "phones")
+    assert s.items_for(b.id, include_expired=True) == [] and s.comments_for(b.id, "p1") == []
+    assert s.fetch_state(b.id) is None

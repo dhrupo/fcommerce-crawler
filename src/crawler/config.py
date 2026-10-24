@@ -50,6 +50,8 @@ def load_config(path: Path) -> Config:
     if ceiling > MAX_RATE:
         raise ConfigError(f"rate ceiling {ceiling}/s is above the {MAX_RATE}/s maximum")
     per_second = min(float(rates.get("per_second", 2.0)), ceiling)
+    if per_second <= 0:
+        raise ConfigError("rates.per_second must be above 0")
 
     return Config(
         places=places,

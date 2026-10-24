@@ -45,3 +45,10 @@ def test_ranked_group_feed_keeps_paging_past_an_old_post():
     ])
     result = fetch_group_posts(t, Config(places=("Sylhet",)), "g", now=lambda: now)
     assert [p["item_id"] for p in result.items] == ["a", "b", "c"]
+
+
+def test_ranked_group_feed_ignores_last_seen():
+    now = 1_800_000_000
+    t = FakeTransport([group_page([("surfaced_late", now - 20 * DAY)], cursor=None)])
+    result = fetch_group_posts(t, Config(places=("Sylhet",)), "g", now=lambda: now, newest_seen=now - DAY)
+    assert [p["item_id"] for p in result.items] == ["surfaced_late"]

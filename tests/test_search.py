@@ -232,3 +232,28 @@ def test_comments_read_when_count_is_unknown(tmp_path):
     store, _ = setup(tmp_path, reader)
     run(store, reader)
     assert reader.comment_calls == ["p1"]
+
+
+def test_failed_comment_read_is_retried_next_time(tmp_path):
+    reader = FakeReader(posts={"https://www.facebook.com/a": FetchResult(Outcome.OK, [post("p1", comments=5)])},
+                        comments={"p1": FetchResult(Outcome.SCHEMA_CHANGED, [], "comments: schema_changed")})
+    store, clock = setup(tmp_path, reader)
+    run(store, reader, clock=clock)
+    clock[0] += 2 * 3600
+    reader.comments_by_post["p1"] = FetchResult(Outcome.OK, [comment("c1", "p1")])
+    run(store, reader, clock=clock)
+    assert reader.comment_calls == ["p1", "p1"]
+    clock[0] += 2 * 3600
+    run(store, reader, clock=clock)
+    assert reader.comment_calls == ["p1", "p1"]
+
+
+def test_instagram_client_bootstraps_again_for_each_read(tmp_path):
+    from crawler.search import InstagramReader
+
+    store = Store(tmp_path, clock=lambda: NOW)
+    src = store.add_source("https://www.instagram.com/shop/", "ig_profile", "Sylhet", "phones")
+    reader = InstagramReader(CONFIG, transport=None, store=store, now=lambda: NOW)
+    first = reader.client(src, fresh=True)
+    assert reader.client(src) is first
+    assert reader.client(src, fresh=True) is not first

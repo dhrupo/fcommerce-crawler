@@ -141,3 +141,25 @@ def test_reply_link_without_a_count_is_still_followed():
 def test_mention_without_offset_is_left_alone():
     c = parse_comment(node("c1", text="72k inbox", ranges=[{"length": 3, "entity": {"__typename": "User"}}]), "p", OWNER)
     assert c["text"] == "72k inbox"
+
+
+def test_streamed_comment_edges_are_read():
+    first = json.loads(comments_page([node("c1")]))
+    streamed = {"label": "stream", "path": ["node", "comment_rendering_instance_for_feed_location", "comments",
+                                            "edges", 1], "data": {"node": node("c2")}}
+    result, _ = run([json.dumps(first) + "\n" + json.dumps(streamed)])
+    assert [c["comment_id"] for c in result.items] == ["c1", "c2"]
+
+
+def test_block_mid_comments_keeps_what_was_read():
+    from crawler.transport import HostBlocked
+
+    class Blocking(FakeTransport):
+        def post(self, url, data=None, **kwargs):
+            if self.sent:
+                raise HostBlocked("facebook.com", 0)
+            return super().post(url, data=data, **kwargs)
+
+    t = Blocking([comments_page([node("c1")], cursor="K")])
+    result = fetch_comments(t, Config(places=("Sylhet",)), POST, owner_id=OWNER)
+    assert result.outcome is Outcome.BLOCKED and [c["comment_id"] for c in result.items] == ["c1"]

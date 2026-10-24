@@ -68,15 +68,15 @@ def test_pinned_old_post_does_not_stop_paging():
 
 def test_incremental_stops_at_last_seen():
     result, t = fetch([
-        page([("new", NOW - 1 * DAY), ("seen", NOW - 3 * DAY)]),
-        page([("older", NOW - 5 * DAY)]),
-    ], newest_seen=NOW - 3 * DAY)
+        page([("new", NOW - 1 * DAY), ("seen", NOW - 10 * DAY)]),
+        page([("older", NOW - 12 * DAY)]),
+    ], newest_seen=NOW - 10 * DAY)
     assert [p["item_id"] for p in result.items] == ["new"]
     assert len(t.cursors) == 1
 
 
 def test_nothing_newer_than_last_seen_is_nothing_new():
-    result, _ = fetch([page([("seen", NOW - 3 * DAY)])], newest_seen=NOW - 3 * DAY)
+    result, _ = fetch([page([("seen", NOW - 10 * DAY)])], newest_seen=NOW - 10 * DAY)
     assert result.outcome is Outcome.NOTHING_NEW
     assert result.items == []
 
@@ -128,3 +128,23 @@ def test_first_read_with_no_recent_posts_says_why():
     result, _ = fetch([page([("old", NOW - 400 * DAY)])])
     assert result.outcome is Outcome.NOTHING_NEW
     assert "no posts" in result.detail
+
+
+def test_block_mid_walk_keeps_items():
+    from crawler.transport import HostBlocked
+
+    class Blocking(FakeTransport):
+        def post(self, url, data=None, **kwargs):
+            if len(self.cursors) == 1:
+                raise HostBlocked("facebook.com", 0)
+            return super().post(url, data=data, **kwargs)
+
+    t = Blocking([page([("a", NOW)])])
+    result = fetch_page_posts(t, Config(places=("Sylhet",)), "1", now=lambda: NOW)
+    assert result.outcome is Outcome.BLOCKED and [p["item_id"] for p in result.items] == ["a"]
+
+
+def test_incremental_read_refreshes_the_last_seven_days():
+    result, _ = fetch([page([("new", NOW - 1 * DAY), ("seen", NOW - 3 * DAY), ("week_old", NOW - 8 * DAY)])],
+                      newest_seen=NOW - 3 * DAY)
+    assert [p["item_id"] for p in result.items] == ["new", "seen"]
