@@ -109,7 +109,7 @@ class InstagramClient:
                 return FetchResult(outcome, items, f"instagram {self.username} page {page_number}: {outcome}")
             conn = docs[0]["data"][POSTS[0]]
             posts = [parse_post(e["node"]) for e in conn.get("edges") or [] if (e.get("node") or {}).get("pk")]
-            is_fresh = [(p["created_at"] or 0) > stop_before for p in posts]
+            is_fresh = [p["created_at"] is None or p["created_at"] > stop_before for p in posts]
             items += [p for p, fresh in zip(posts, is_fresh, strict=True) if fresh]
             info = conn.get("page_info") or {}
             cursor = info.get("end_cursor") if info.get("has_next_page") else None

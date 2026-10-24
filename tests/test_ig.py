@@ -77,3 +77,9 @@ def test_profile_without_lsd_token_is_schema_changed():
     c, t = client([])
     t.get = lambda url, **kw: SimpleNamespace(status_code=200, text="<html>new layout</html>", url=url)
     assert c.fetch_posts().outcome is Outcome.SCHEMA_CHANGED
+
+
+def test_post_without_time_is_kept():
+    text = (FIXTURES / "ig_profile_posts.json").read_text().replace('"taken_at":1775837895', '"taken_at":null', 1)
+    c, _ = client([(200, text)])
+    assert "3872331137620292903" in {p["item_id"] for p in c.fetch_posts(max_pages=1).items}

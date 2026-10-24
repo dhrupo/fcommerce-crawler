@@ -129,3 +129,15 @@ def test_transient_error_on_comments_is_retried():
                                         "message": "missing_required_variable_value"}]})
     result, _ = run([transient, comments_page([node("c1")])])
     assert result.outcome is Outcome.OK and [c["comment_id"] for c in result.items] == ["c1"]
+
+
+def test_reply_link_without_a_count_is_still_followed():
+    parent = node("c1", replies=1)
+    del parent["feedback"]["replies_fields"]
+    result, _ = run([comments_page([parent]), replies_page([node("r1", depth=1)])])
+    assert [c["comment_id"] for c in result.items] == ["c1", "r1"]
+
+
+def test_mention_without_offset_is_left_alone():
+    c = parse_comment(node("c1", text="72k inbox", ranges=[{"length": 3, "entity": {"__typename": "User"}}]), "p", OWNER)
+    assert c["text"] == "72k inbox"

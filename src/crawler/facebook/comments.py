@@ -20,8 +20,9 @@ def strip_person_mentions(body: dict) -> str:
     """Remove every tagged person from the text; FB range offsets count UTF-16 units."""
     text = body.get("text") or ""
     spans = sorted(
-        ((r.get("offset") or 0, r.get("length") or 0) for r in body.get("ranges") or []
-         if isinstance(r, dict) and (r.get("entity") or {}).get("__typename") == "User"),
+        ((r["offset"], r["length"]) for r in body.get("ranges") or []
+         if isinstance(r, dict) and (r.get("entity") or {}).get("__typename") == "User"
+         and isinstance(r.get("offset"), int) and isinstance(r.get("length"), int)),
         reverse=True,
     )
     if not spans:
@@ -48,8 +49,8 @@ def parse_comment(node: dict, item_id: str, owner_id: str | None, parent_id: str
 def _reply_handle(node: dict) -> tuple[str, str] | None:
     feedback = node.get("feedback") or {}
     token = (feedback.get("expansion_info") or {}).get("expansion_token")
-    count = (feedback.get("replies_fields") or {}).get("total_count") or 0
-    return (feedback["id"], token) if token and count and feedback.get("id") else None
+    count = (feedback.get("replies_fields") or {}).get("total_count")
+    return (feedback["id"], token) if token and count != 0 and feedback.get("id") else None
 
 
 class _Walker:

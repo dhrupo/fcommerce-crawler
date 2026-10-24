@@ -224,3 +224,11 @@ def test_blocked_read_skips_comments(tmp_path):
     store, _ = setup(tmp_path, reader)
     events = [e for e in run(store, reader) if e["source"]["kind"] == "fb_page"]
     assert events[1]["outcome"] == "blocked" and reader.comment_calls == []
+
+
+def test_comments_read_when_count_is_unknown(tmp_path):
+    unknown = {**post("p1"), "comment_count": None}
+    reader = FakeReader(posts={"https://www.facebook.com/a": FetchResult(Outcome.OK, [unknown])})
+    store, _ = setup(tmp_path, reader)
+    run(store, reader)
+    assert reader.comment_calls == ["p1"]

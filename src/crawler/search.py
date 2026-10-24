@@ -105,7 +105,8 @@ class _SourceJob:
             self.event("comments", result.outcome, self.stored_comments(strategy, now), result.detail, True)
             return
 
-        grew = [p for p in result.items if (p.get("comment_count") or 0) > (before.get(p["item_id"]) or 0)]
+        grew = [p for p in result.items
+                if p.get("comment_count") is None or p["comment_count"] > (before.get(p["item_id"]) or 0)]
         outcome, detail = (Outcome.OK if grew else Outcome.NOTHING_NEW), None
         for post in grew:
             try:
