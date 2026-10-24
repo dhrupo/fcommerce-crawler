@@ -86,11 +86,6 @@ class Transport:
         """Take before a fetch; a block reported with it is ignored if another thread already acted on one."""
         return self._limiter(url).generation
 
-    def mark_blocked(self, url: str) -> None:
-        limiter = self._limiter(url)
-        with limiter.lock:
-            self._cool_down(limiter, "cooldown")
-
     def force_login(self, url: str) -> bool:
         limiter, site = self._limiter(url), site_of(url)
         with limiter.lock:

@@ -114,9 +114,9 @@ def test_blocked_host_cools_down():
     assert t.post(FB, data={}).status_code == 200
 
 
-def test_mark_blocked_after_classified_block():
+def test_classified_block_cools_down_the_whole_host():
     t, _, _ = make()
-    t.mark_blocked("https://www.facebook.com/login/?next=x")
+    assert t.report_block("https://www.facebook.com/login/?next=x") == "cooldown"
     with pytest.raises(HostBlocked):
         t.get("https://www.facebook.com/marketplace/1/search?query=a")
 
@@ -151,7 +151,7 @@ def test_cooldown_started_while_waiting_stops_the_request():
 
     def sleep_then_block(seconds):
         real_sleep(seconds)
-        t.mark_blocked(FB)
+        t.report_block(FB)
 
     t._sleep = sleep_then_block
     with pytest.raises(HostBlocked):
