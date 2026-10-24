@@ -6,3 +6,4 @@ __pycache__/
 crawler.toml
 data/
 scrub_map.txt
+data-run2/

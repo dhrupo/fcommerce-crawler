@@ -1,0 +1,14 @@
+# At most 2 places. Searches for any other place are rejected.
+places = ["Sylhet", "Dhaka"]
+categories = ["phones", "clothes", "outdoor"]
+data_dir = "data"
+
+[rates]
+per_second = 2.0   # per host, with ±20% jitter
+ceiling = 4.0      # hard maximum is 4/s
+
+[marketplace_city_ids]
+Sylhet = "112294682115503"
+
+# Only set these when `crawler doctor` reports a newer id.
+[doc_ids]
