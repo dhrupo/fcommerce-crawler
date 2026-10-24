@@ -349,3 +349,87 @@ def test_marketplace_drops_listings_older_than_60_days(tmp_path):
     events = run(store, reader, keyword="iphone", marketplace=lambda place, keyword: FetchResult(Outcome.OK, listings))
     mkt = next(e for e in events if e["source"]["kind"] == "fb_marketplace")
     assert [i["item_id"] for i in mkt["items"]] == ["new"]
+
+
+class FallbackTransport:
+    def __init__(self, reports):
+        self.reports = list(reports)
+        self.tokens = []
+        self.generation = 0
+
+    def mode_token(self, url):
+        return self.generation
+
+    def report_block(self, url, token=None):
+        self.tokens.append(token)
+        self.generation += 1
+        return self.reports.pop(0)
+
+
+def page_reader(monkeypatch, tmp_path, results, reports):
+    from crawler import search as search_module
+    from crawler.search import FacebookPageReader
+
+    calls = []
+    queue_ = list(results)
+
+    def fake_fetch(transport, config, page_id, **kwargs):
+        calls.append(page_id)
+        return queue_.pop(0)
+
+    monkeypatch.setattr(search_module, "fetch_page_posts", fake_fetch)
+    store = Store(tmp_path, clock=lambda: NOW)
+    src = store.add_source("https://www.facebook.com/a", "fb_page", "Sylhet", "phones", native_id="42")
+    t = FallbackTransport(reports)
+    return FacebookPageReader(CONFIG, t, store, now=lambda: NOW), src, calls, t, store
+
+
+def test_blocked_source_retried_once_logged_in(monkeypatch, tmp_path):
+    reader, src, calls, t, _ = page_reader(monkeypatch, tmp_path, [
+        FetchResult(Outcome.BLOCKED, [], "page 1: blocked"), FetchResult(Outcome.OK, [post("p1")])], ["login"])
+    result = reader.posts(src, None)
+    assert result.outcome is Outcome.OK and len(calls) == 2
+    assert t.tokens == [0]
+
+
+def test_blocked_without_login_is_not_retried(monkeypatch, tmp_path):
+    reader, src, calls, _, _ = page_reader(monkeypatch, tmp_path, [
+        FetchResult(Outcome.BLOCKED, [], "page 1: blocked"), FetchResult(Outcome.OK, [post("p1")])], ["cooldown"])
+    assert reader.posts(src, None).outcome is Outcome.BLOCKED and len(calls) == 1
+
+
+def test_login_expired_is_labelled(monkeypatch, tmp_path):
+    blocked = FetchResult(Outcome.BLOCKED, [], "page 1: blocked")
+    reader, src, calls, _, store = page_reader(monkeypatch, tmp_path, [blocked, blocked], ["login", "expired"])
+    events = list(search(CONFIG, store, "Sylhet", "phones", readers={"fb_page": reader},
+                         marketplace=lambda place, keyword: FetchResult(Outcome.NOTHING_NEW, []), now=lambda: NOW))
+    page_events = [e for e in events if e["source"]["kind"] == "fb_page"]
+    assert [(e["phase"], e["outcome"]) for e in page_events] == [("posts", "login_expired"),
+                                                                 ("comments", "login_expired")]
+    assert "login" in page_events[0]["detail"]
+    assert len(calls) == 2
+    assert store.fetch_state(src.id).last_outcome == "login_expired"
+
+
+def test_page_id_lookup_block_uses_login_fallback(monkeypatch, tmp_path):
+    from crawler import search as search_module
+    from crawler.search import FacebookPageReader
+
+    answers = [(Outcome.BLOCKED, None), (Outcome.OK, "42")]
+    monkeypatch.setattr(search_module, "resolve_page_id", lambda transport, url: answers.pop(0))
+    monkeypatch.setattr(search_module, "fetch_page_posts",
+                        lambda transport, config, page_id, **kw: FetchResult(Outcome.OK, [post(page_id)]))
+    store = Store(tmp_path, clock=lambda: NOW)
+    src = store.add_source("https://www.facebook.com/a", "fb_page", "Sylhet", "phones")
+    reader = FacebookPageReader(CONFIG, FallbackTransport(["login"]), store, now=lambda: NOW)
+    assert [p["item_id"] for p in reader.posts(src, None).items] == ["42"]
+    assert store.get_source(src.url).native_id == "42"
+
+
+def test_comments_stop_after_login_expired(tmp_path):
+    reader = FakeReader(posts={"https://www.facebook.com/a": FetchResult(
+        Outcome.OK, [post("p1", comments=1), post("p2", comments=1)])},
+        comments={"p1": FetchResult(Outcome.LOGIN_EXPIRED, [], "refused")})
+    store, _ = setup(tmp_path, reader)
+    events = [e for e in run(store, reader) if e["phase"] == "comments"]
+    assert reader.comment_calls == ["p1"] and events[0]["outcome"] == "login_expired"

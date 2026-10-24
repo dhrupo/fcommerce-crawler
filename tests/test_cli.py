@@ -135,3 +135,54 @@ def test_reparse_reads_streamed_comment_edges(cfg):
     s.save_raw(src.id, "comments", json.dumps(first) + "\n" + json.dumps(streamed))
     assert main(["--config", str(cfg), "reparse", "--since", "2000-01-01"]) == 0
     assert [c["comment_id"] for c in s.comments_for(src.id, "1496609455589383")] == ["c1", "c2"]
+
+
+FB_EXPORT = (".facebook.com\tTRUE\t/\tTRUE\t1893456000\tc_user\t1000001\n"
+             ".facebook.com\tTRUE\t/\tTRUE\t1893456000\txs\tPLANTED-XS-VALUE\n")
+
+
+def test_login_saves_session_and_status_hides_values(cfg, tmp_path, capsys):
+    export = tmp_path / "fb-cookies.txt"
+    export.write_text(FB_EXPORT)
+    assert main(["--config", str(cfg), "login", "fb", "--cookies", str(export)]) == 0
+    out = capsys.readouterr().out
+    assert "fb" in out and "PLANTED-XS-VALUE" not in out and "1000001" not in out
+    assert main(["--config", str(cfg), "status"]) == 0
+    status = capsys.readouterr().out
+    assert "login fb: ready" in status and "login ig: none" in status
+    assert "PLANTED-XS-VALUE" not in status
+
+
+def test_login_with_bad_export_fails_plainly(cfg, tmp_path, capsys):
+    export = tmp_path / "ig.txt"
+    export.write_text(FB_EXPORT)
+    assert main(["--config", str(cfg), "login", "ig", "--cookies", str(export)]) == 1
+    assert "sessionid" in capsys.readouterr().err
+    assert main(["--config", str(cfg), "login", "ig", "--cookies", str(tmp_path / "missing.txt")]) == 1
+
+
+def test_logout_removes_session(cfg, tmp_path, capsys):
+    export = tmp_path / "fb-cookies.txt"
+    export.write_text(FB_EXPORT)
+    main(["--config", str(cfg), "login", "fb", "--cookies", str(export)])
+    assert main(["--config", str(cfg), "logout", "fb"]) == 0
+    assert not (cfg.parent / "data" / "sessions" / "fb.json").exists()
+    assert main(["--config", str(cfg), "logout", "fb"]) == 1
+
+
+def test_cli_transport_gets_the_session_store(cfg, monkeypatch):
+    seen = {}
+
+    def factory(config, sessions=None):
+        seen["sessions"] = sessions
+        raise SystemExit(0)
+
+    with pytest.raises(SystemExit):
+        main(["--config", str(cfg), "search", "--place", "Sylhet", "x"], transport_factory=factory)
+    assert seen["sessions"] is not None
+
+
+def test_doctor_login_requires_live(cfg, capsys):
+    with pytest.raises(SystemExit) as e:
+        main(["--config", str(cfg), "doctor", "--login"])
+    assert e.value.code == 2 and "--live" in capsys.readouterr().err

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .config import ConfigError, load_config
 from .facebook.bootstrap import group_id_from_url
+from .sessions import SITES, SessionError, SessionStore
 from .store import Store
 
 KINDS = ("fb_page", "fb_group", "ig_profile")
@@ -53,6 +54,12 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("doctor", help="find current doc_ids in Facebook's JS bundles")
     d.add_argument("--page", default="https://www.facebook.com/iStoreSyl")
     d.add_argument("--live", action="store_true", help="also run the live smoke check")
+    d.add_argument("--login", action="store_true", help="run the live smoke check with the imported logins")
+    lg = sub.add_parser("login", help="import browser cookies; used only after a site blocks logged-out reading")
+    lg.add_argument("site", choices=sorted(SITES))
+    lg.add_argument("--cookies", required=True, help="cookies.txt (Netscape) or JSON export from your browser")
+    lo = sub.add_parser("logout", help="delete an imported login")
+    lo.add_argument("site", choices=sorted(SITES))
     sv = sub.add_parser("serve", help="local HTTP API: POST /search streams NDJSON")
     sv.add_argument("--port", type=int, default=8765)
     return p
@@ -64,7 +71,10 @@ def fail(message: str) -> int:
 
 
 def main(argv=None, transport_factory=None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command == "doctor" and args.login and not args.live:
+        parser.error("doctor --login needs --live: it runs the live smoke check with the imported logins")
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:
         config = load_config(Path(args.config))
@@ -72,14 +82,26 @@ def main(argv=None, transport_factory=None) -> int:
         return fail(str(e))
     data_dir = config.data_dir if config.data_dir.is_absolute() else Path(args.config).parent / config.data_dir
     store = Store(data_dir)
+    sessions = SessionStore(data_dir)
 
     def transport():
         from .transport import Transport
-        return (transport_factory or Transport)(config)
+        return (transport_factory or Transport)(config, sessions=sessions)
 
     if args.command == "sources":
         return sources(args, config, store)
+    if args.command == "login":
+        try:
+            sessions.import_export(args.site, Path(args.cookies).read_text())
+        except (OSError, SessionError) as e:
+            return fail(f"login {args.site} failed: {e}")
+        print(f"login {args.site}: saved; it is used only after {SITES[args.site][0]} blocks logged-out reading")
+        return 0
+    if args.command == "logout":
+        return 0 if sessions.remove(args.site) else fail(f"no login saved for {args.site}")
     if args.command == "status":
+        for site in sorted(SITES):
+            print(f"login {site}: {sessions.state(site)}")
         for s in store.list_sources():
             st = store.fetch_state(s.id)
             state = (f"{st.last_outcome:<14} tried {when(st.attempted_at)}  good {when(st.fetched_at)}  "
@@ -118,6 +140,10 @@ def main(argv=None, transport_factory=None) -> int:
         from .doctor import live_smoke, scan_doc_ids
         from .transport import DROPS
         t = transport()
+        if args.login:
+            for site, (host, _) in SITES.items():
+                state = "logged in" if t.force_login(f"https://www.{host}/") else f"no login ({sessions.state(site)})"
+                print(f"login {site}: {state}")
         try:
             rows = scan_doc_ids(t, config, args.page)
         except DROPS as e:

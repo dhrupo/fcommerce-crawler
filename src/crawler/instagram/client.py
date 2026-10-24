@@ -76,7 +76,7 @@ class InstagramClient:
         return Outcome.OK
 
     def _ask(self, doc_key: str, friendly: str, variables: dict, referer: str, connection, label: str):
-        headers = {"x-ig-app-id": APP_ID, "x-csrftoken": self.transport.session().cookies.get("csrftoken") or "",
+        headers = {"x-ig-app-id": APP_ID, "x-csrftoken": self.transport.cookie(GRAPHQL_URL, "csrftoken") or "",
                    "x-requested-with": "XMLHttpRequest", "x-fb-lsd": self.lsd, "x-fb-friendly-name": friendly,
                    "Accept": "*/*", "Origin": "https://www.instagram.com", "Referer": referer,
                    "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty"}

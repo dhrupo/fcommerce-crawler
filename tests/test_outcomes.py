@@ -80,3 +80,12 @@ def test_ig_401_require_login_is_blocked():
 
 def test_404_is_gone():
     assert classify(reply("", status=404)) is Outcome.GONE
+
+
+def test_fb_login_required_reply_is_blocked():
+    assert classify(reply('for (;;);{"__ar":1,"error":1357001,"errorSummary":"Please log in"}'), TIMELINE) \
+        is Outcome.BLOCKED
+
+
+def test_login_expired_is_a_label():
+    assert Outcome.LOGIN_EXPIRED == "login_expired"

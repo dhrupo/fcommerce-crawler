@@ -139,7 +139,7 @@ class _SourceJob:
         newest = max((p["created_at"] for p in result.items if p.get("created_at")), default=None) if complete else None
         self.store.set_fetch_state(self.source.id, result.outcome, newest_created_at=newest, detail=result.detail)
         self.event("posts", result.outcome, self.stored_posts(strategy, changes, now), result.detail, not complete)
-        if result.outcome is Outcome.BLOCKED or not result.items:
+        if result.outcome in (Outcome.BLOCKED, Outcome.LOGIN_EXPIRED) or not result.items:
             self.event("comments", result.outcome, self.stored_comments(strategy, now), result.detail, True)
             return
 
@@ -168,7 +168,7 @@ class _SourceJob:
                 self.store.set_comments_read(self.source.id, post["item_id"], post.get("comment_count"))
             if got.outcome not in FETCHED:
                 outcome, detail = got.outcome, got.detail
-                if got.outcome is Outcome.BLOCKED:
+                if got.outcome in (Outcome.BLOCKED, Outcome.LOGIN_EXPIRED):
                     break
             elif got.outcome is Outcome.OK and outcome is Outcome.NOTHING_NEW:
                 outcome = Outcome.OK
@@ -254,6 +254,24 @@ def fetch_source(config: Config, store: Store, readers: dict, source: Source, no
     return events
 
 
+def fetch_with_login(transport, url: str, fetch, on_login=None) -> FetchResult:
+    """Run a fetch; if the site blocks it and an imported login takes over, run it once more logged in."""
+    for attempt in (1, 2):
+        token = transport.mode_token(url)
+        result = fetch()
+        if result.outcome is not Outcome.BLOCKED:
+            return result
+        report = transport.report_block(url, token)
+        if report == "expired":
+            return FetchResult(Outcome.LOGIN_EXPIRED, result.items,
+                               "the imported login was refused; reading logged-out after the cooldown")
+        if report != "login" or attempt == 2:
+            return result
+        if on_login:
+            on_login()
+    return result
+
+
 class _Reader:
     def __init__(self, config: Config, transport: Transport, store: Store, now=time.time):
         self.config, self.transport, self.store, self.now = config, transport, store, now
@@ -261,10 +279,11 @@ class _Reader:
     def raw(self, source):
         return lambda label, text: self.store.save_raw(source.id, label, text)
 
-    def checked(self, source, result: FetchResult) -> FetchResult:
-        if result.outcome is Outcome.BLOCKED:
-            self.transport.mark_blocked(source.url)
-        return result
+    def checked(self, source, fetch) -> FetchResult:
+        return fetch_with_login(self.transport, source.url, fetch, lambda: self.on_login(source))
+
+    def on_login(self, source) -> None:
+        """Called before the logged-in retry."""
 
 
 class FacebookPageReader(_Reader):
@@ -273,18 +292,28 @@ class FacebookPageReader(_Reader):
     def posts(self, source, newest_seen):
         page_id = source.native_id
         if not page_id:
-            outcome, page_id = resolve_page_id(self.transport, source.url)
-            if outcome is not Outcome.OK:
-                return self.checked(source, FetchResult(outcome, [], f"page id of {source.url}: {outcome}"))
+            found = []
+
+            def resolve():
+                outcome, page_id = resolve_page_id(self.transport, source.url)
+                found.append(page_id)
+                return FetchResult(outcome, [], None if page_id else f"page id of {source.url}: {outcome}")
+
+            result = self.checked(source, resolve)
+            if result.outcome is not Outcome.OK:
+                return result
+            page_id = found[-1]
             self.store.update_source(source.id, native_id=page_id)
-        return self.checked(source, fetch_page_posts(self.transport, self.config, page_id, newest_seen=newest_seen,
-                                                     now=self.now, on_raw=self.raw(source)))
+        return self.checked(source, lambda: fetch_page_posts(self.transport, self.config, page_id,
+                                                             newest_seen=newest_seen, now=self.now,
+                                                             on_raw=self.raw(source)))
 
     def owner_for(self, source, post):
         return post.get("owner_id") or source.native_id
 
     def comments(self, source, post, owner_id):
-        return self.checked(source, fetch_comments(self.transport, self.config, post, owner_id, self.raw(source)))
+        return self.checked(source, lambda: fetch_comments(self.transport, self.config, post, owner_id,
+                                                           self.raw(source)))
 
 
 class FacebookGroupReader(FacebookPageReader):
@@ -294,9 +323,9 @@ class FacebookGroupReader(FacebookPageReader):
         group_id = group_id_from_url(source.url)
         if not group_id:
             return FetchResult(Outcome.GONE, [], "group sources need the numeric /groups/<id> URL")
-        return self.checked(source, fetch_group_posts(self.transport, self.config, group_id,
-                                                      newest_seen=newest_seen, now=self.now,
-                                                      on_raw=self.raw(source)))
+        return self.checked(source, lambda: fetch_group_posts(self.transport, self.config, group_id,
+                                                              newest_seen=newest_seen, now=self.now,
+                                                              on_raw=self.raw(source)))
 
     def owner_for(self, source, post):
         return post.get("author_id")
@@ -319,14 +348,18 @@ class InstagramReader(_Reader):
                                                            self.raw(source))
             return self._clients[source.id]
 
+    def on_login(self, source) -> None:
+        with self._lock:
+            self._clients.pop(source.id, None)
+
     def posts(self, source, newest_seen):
-        return self.checked(source, self.client(source, fresh=True).fetch_posts(newest_seen))
+        return self.checked(source, lambda: self.client(source, fresh=True).fetch_posts(newest_seen))
 
     def owner_for(self, source, post):
         return self.client(source).owner_id
 
     def comments(self, source, post, owner_id):
-        return self.checked(source, self.client(source).fetch_comments(post))
+        return self.checked(source, lambda: self.client(source).fetch_comments(post))
 
 
 def default_readers(config: Config, transport: Transport, store: Store) -> dict:
@@ -339,10 +372,8 @@ def default_marketplace(config: Config, transport: Transport, store: Store):
     def run(place, keyword):
         source = store.get_source(f"marketplace:{place}")
         on_raw = (lambda label, text: store.save_raw(source.id, label, text)) if source else None
-        result = search_marketplace(transport, config, place, keyword, on_raw)
-        if result.outcome is Outcome.BLOCKED:
-            transport.mark_blocked("https://www.facebook.com/marketplace")
-        return result
+        return fetch_with_login(transport, "https://www.facebook.com/marketplace",
+                                lambda: search_marketplace(transport, config, place, keyword, on_raw))
     return run
 
 

@@ -51,12 +51,15 @@ def live_smoke(transport, config: Config, store, page_url: str = "https://www.fa
     from .facebook.marketplace import search_marketplace
     from .facebook.pages import fetch_page_posts
     from .instagram.client import InstagramClient
-    from .outcomes import Outcome
+    from .outcomes import FetchResult, Outcome
+    from .search import fetch_with_login
     from .transport import DROPS, HostBlocked
 
-    def attempt(step):
+    def attempt(url, step):
+        """Through the same login-aware path as a search, so a refused login is expired here too."""
         try:
-            return step()
+            result = fetch_with_login(transport, url, step)
+            return result.outcome, len(result.items)
         except HostBlocked:
             return Outcome.BLOCKED, 0
         except DROPS:
@@ -67,31 +70,26 @@ def live_smoke(transport, config: Config, store, page_url: str = "https://www.fa
     def page_posts():
         outcome, page_id = resolve_page_id(transport, page_url)
         if not page_id:
-            return outcome, 0
+            return FetchResult(outcome, [])
         found["posts"] = fetch_page_posts(transport, config, page_id, max_pages=2)
-        return found["posts"].outcome, len(found["posts"].items)
+        return found["posts"]
 
     def comments():
         posts = found.get("posts")
         post = next((p for p in (posts.items if posts else []) if (p.get("comment_count") or 0) > 0), None)
         if not post:
-            return "no post with comments in the first pages", 0
-        got = fetch_comments(transport, config, post, post.get("owner_id"))
-        return got.outcome, len(got.items)
-
-    def marketplace(place):
-        got = search_marketplace(transport, config, place, "iphone")
-        return got.outcome, len(got.items)
-
-    def instagram():
-        got = InstagramClient(transport, config, ig_username).fetch_posts(max_pages=1)
-        return got.outcome, len(got.items)
+            return FetchResult("no post with comments in the first pages", [])
+        return fetch_comments(transport, config, post, post.get("owner_id"))
 
     place = next(iter(config.marketplace_city_ids), None)
-    checks = [("fb page posts", *attempt(page_posts)), ("fb comments", *attempt(comments)),
-              (f"marketplace {place}", *attempt(lambda: marketplace(place))) if place
-              else ("marketplace", "no marketplace_city_ids in config", 0),
-              (f"instagram {ig_username}", *attempt(instagram))]
+    checks = [("fb page posts", *attempt(page_url, page_posts)),
+              ("fb comments", *attempt(page_url, comments)),
+              (f"marketplace {place}", *attempt("https://www.facebook.com/marketplace",
+                                                lambda: search_marketplace(transport, config, place, "iphone")))
+              if place else ("marketplace", "no marketplace_city_ids in config", 0),
+              (f"instagram {ig_username}", *attempt(
+                  "https://www.instagram.com/", lambda: InstagramClient(transport, config, ig_username)
+                  .fetch_posts(max_pages=1)))]
 
     passed = 0
     for name, outcome, count in checks:

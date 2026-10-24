@@ -11,10 +11,12 @@ class Outcome(StrEnum):
     SCHEMA_CHANGED = "schema_changed"
     GONE = "gone"
     OUT_OF_SCOPE = "out_of_scope"
+    LOGIN_EXPIRED = "login_expired"
     CRASH = "crash"
 
 
 BLOCK_CODES = {1675004}
+LOGIN_REQUIRED_CODES = {1357001}
 LOGIN_URL_PARTS = ("/login", "/accounts/login", "/checkpoint")
 HTML_BLOCK_MARKERS = ("CometErrorRoot", "blocked by our security", "temporarily blocked")
 
@@ -42,6 +44,17 @@ def dig(obj, path):
     return obj
 
 
+def rate_limited(response) -> bool:
+    """"Slow down", as HTTP 429 or a 1675004 error inside a 200 reply."""
+    if response.status_code == 429:
+        return True
+    text = response.text or ""
+    if "1675004" not in text[:5000]:
+        return False
+    return any(isinstance(e, dict) and e.get("code") in BLOCK_CODES
+               for d in json_documents(text[:5000]) for e in d.get("errors") or [])
+
+
 def classify(response, connection: tuple[str, ...] | None = None) -> Outcome:
     """Label a raw reply. `connection` is the key path under `data` that must hold the result."""
     status = response.status_code
@@ -61,7 +74,8 @@ def classify(response, connection: tuple[str, ...] | None = None) -> Outcome:
 
     docs = json_documents(text)
     errors = [e for d in docs for e in (d.get("errors") or []) if isinstance(e, dict)]
-    if any(e.get("code") in BLOCK_CODES for e in errors) or any(d.get("require_login") for d in docs):
+    if (any(e.get("code") in BLOCK_CODES for e in errors) or any(d.get("require_login") for d in docs)
+            or any(d.get("error") in LOGIN_REQUIRED_CODES for d in docs)):
         return Outcome.BLOCKED
 
     found = next((dig(d.get("data"), connection) for d in docs if "path" not in d), None)
