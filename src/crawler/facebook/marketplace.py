@@ -6,7 +6,7 @@ from ..config import Config
 from ..outcomes import FetchResult, Outcome, classify
 from .parse import walk
 
-SCRIPT_JSON = re.compile(r'<script type="application/json"[^>]*>(.*?)</script>', re.S)
+SCRIPT_JSON = re.compile(r'<script type="application/json"[^>]*>(.*?)</script>', re.DOTALL)
 
 
 def parse_price(price) -> dict | str:
@@ -49,10 +49,10 @@ def parse_search(html: str) -> tuple[Outcome, list[dict]]:
     listings, seen = [], set()
     for feed in feeds:
         for d in walk(feed):
-            if d.get("__typename") == "GroupCommerceProductItem" and d.get("id") and "marketplace_listing_title" in d:
-                if d["id"] not in seen:
-                    seen.add(d["id"])
-                    listings.append(parse_listing(d))
+            is_listing = d.get("__typename") == "GroupCommerceProductItem" and "marketplace_listing_title" in d
+            if is_listing and d.get("id") and d["id"] not in seen:
+                seen.add(d["id"])
+                listings.append(parse_listing(d))
     return (Outcome.OK if listings else Outcome.NOTHING_NEW), listings
 
 
