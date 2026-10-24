@@ -473,3 +473,14 @@ def test_logout_stops_a_running_login(tmp_path):
     t.post(FB, data=form())
     last = made[-1].calls[-1] if made[-1].calls else made[0].calls[-1]
     assert last[2]["data"]["av"] == "0" and not made[-1].cookies
+
+
+def test_a_leftover_send_from_an_older_mode_is_ignored(tmp_path):
+    t, _, clock, sessions = login_transport(tmp_path)
+    t.report_block(FB)
+    t.post(FB, data=form())  # this thread's last send: logged in, in the old login window
+    clock.now += t.login_seconds + 1
+    t.report_block(FB)  # a later logged-out block starts a new login window (new generation)
+    token = t.mode_token(FB)
+    clock.now += t.login_seconds + 1  # ...which also ends without this thread sending anything
+    assert t.report_block(FB, (token[0], False)) != "expired" and sessions.state("fb") != "expired"

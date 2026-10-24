@@ -104,7 +104,9 @@ class Transport:
         if token is None:
             sent_logged_in, slowed_down = self._login_active(limiter), False
         else:
-            sent_logged_in, slowed_down = self._last_sent().get(host_key(url), (token[1], False))
+            generation, sent_logged_in, slowed_down = self._last_sent().get(host_key(url), (None, token[1], False))
+            if generation != token[0]:
+                sent_logged_in, slowed_down = token[1], False
         with limiter.lock:
             now = self._clock()
             if (token is not None and token[0] != limiter.generation) or now < limiter.blocked_until:
@@ -136,7 +138,7 @@ class Transport:
             kwargs["data"] = self._with_fb_identity(kwargs["data"], limiter, stale=kwargs["data"]["fb_dtsg"])
             response = self._send(method, url, limiter, kwargs, logged_in)
         slowed_down = rate_limited(response)
-        self._last_sent()[host_key(url)] = (logged_in, slowed_down)
+        self._last_sent()[host_key(url)] = (token[0], logged_in, slowed_down)
         if slowed_down:
             self.report_block(url, token)
         else:
