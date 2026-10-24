@@ -20,6 +20,9 @@ class FakeTransport:
     def session(self):
         return self._session
 
+    def cookie(self, url, name):
+        return self._session.cookies.get(name)
+
     def get(self, url, **kwargs):
         return SimpleNamespace(status_code=200, text=(FIXTURES / "ig_profile.html").read_text(), url=url)
 
