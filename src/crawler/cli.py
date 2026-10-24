@@ -88,7 +88,10 @@ def main(argv=None, transport_factory=None) -> int:
         return 0
     if args.command == "reparse":
         from .search import reparse_raw
-        since = datetime.strptime(args.since, "%Y-%m-%d").timestamp()
+        try:
+            since = datetime.strptime(args.since, "%Y-%m-%d").timestamp()
+        except ValueError:
+            return fail("--since must be a date like YYYY-MM-DD")
         counts = reparse_raw(store, since)
         print(f"rebuilt {counts['posts']} items and {counts['comments']} comments ({counts['skipped']} skipped)")
         return 0
@@ -105,14 +108,21 @@ def main(argv=None, transport_factory=None) -> int:
         source = store.get_source(args.url)
         if source is None:
             return fail(f"{args.url} is not a source; add it with `crawler sources add` first")
+        if source.kind == "fb_marketplace":
+            return fail("Marketplace has no stored feed; use `crawler search --place <place> <keyword>`")
         t = transport()
-        for event in fetch_source(store, default_readers(config, t, store), source):
+        for event in fetch_source(config, store, default_readers(config, t, store), source):
             print(json.dumps(event, ensure_ascii=False, default=str), flush=True)
         return 0
     if args.command == "doctor":
         from .doctor import live_smoke, scan_doc_ids
+        from .transport import DROPS
         t = transport()
-        for row in scan_doc_ids(t, config, args.page):
+        try:
+            rows = scan_doc_ids(t, config, args.page)
+        except DROPS as e:
+            return fail(f"cannot reach facebook.com: {e}")
+        for row in rows:
             mark = "same" if row["found"] == row["config"] else ("not found" if not row["found"] else "DIFFERENT")
             print(f"{row['key']:<12} {row['query']:<45} config={row['config']} found={row['found']}  {mark}")
         if args.live:
@@ -120,7 +130,10 @@ def main(argv=None, transport_factory=None) -> int:
         return 0
     if args.command == "serve":
         from .api import serve
-        serve(config, store, transport(), port=args.port)
+        try:
+            serve(config, store, transport(), port=args.port)
+        except OSError as e:
+            return fail(f"cannot listen on 127.0.0.1:{args.port}: {e.strerror}")
         return 0
     return 1
 
@@ -130,6 +143,8 @@ def sources(args, config, store) -> int:
         if not config.has_place(args.place):
             return fail(f"{args.place} is not one of the configured places: {', '.join(config.places)}")
         kind = args.kind or source_kind(args.url)
+        if config.categories and args.category.casefold() not in {c.casefold() for c in config.categories}:
+            return fail(f"{args.category} is not one of the configured categories: {', '.join(config.categories)}")
         if kind == "fb_group" and not group_id_from_url(args.url):
             return fail("logged out, only numeric group URLs work: https://www.facebook.com/groups/<id>/")
         s = store.add_source(args.url, kind, args.place, args.category)

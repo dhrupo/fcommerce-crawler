@@ -39,6 +39,11 @@ def load_config(path: Path) -> Config:
     except (OSError, tomllib.TOMLDecodeError) as e:
         raise ConfigError(f"cannot read {path}: {e}") from e
 
+    if not isinstance(raw.get("places", []), list):
+        raise ConfigError('places must be a list, e.g. places = ["Sylhet"]')
+    for table in ("rates", "doc_ids", "marketplace_city_ids"):
+        if not isinstance(raw.get(table, {}), dict):
+            raise ConfigError(f"{table} must be a table, e.g. [{table}]")
     places = tuple(raw.get("places") or ())
     if not places:
         raise ConfigError("config needs at least 1 place")
@@ -46,10 +51,14 @@ def load_config(path: Path) -> Config:
         raise ConfigError(f"config allows at most {MAX_PLACES} places, got {len(places)}")
 
     rates = raw.get("rates") or {}
-    ceiling = float(rates.get("ceiling", MAX_RATE))
+    try:
+        ceiling = float(rates.get("ceiling", MAX_RATE))
+        per_second = float(rates.get("per_second", 2.0))
+    except (TypeError, ValueError) as e:
+        raise ConfigError("rates.per_second and rates.ceiling must be numbers") from e
     if ceiling > MAX_RATE:
         raise ConfigError(f"rate ceiling {ceiling}/s is above the {MAX_RATE}/s maximum")
-    per_second = min(float(rates.get("per_second", 2.0)), ceiling)
+    per_second = min(per_second, ceiling)
     if per_second <= 0:
         raise ConfigError("rates.per_second must be above 0")
 

@@ -1,5 +1,7 @@
 import json
 import re
+
+MENTION = re.compile(r"@[\w.]+")
 import time
 
 from ..config import Config
@@ -45,7 +47,7 @@ def parse_comment(node: dict, item_id: str, owner_id: str | None) -> dict:
         "parent_id": node.get("parent_comment_id"),
         "depth": 1 if node.get("parent_comment_id") else 0,
         "created_at": node.get("created_at"),
-        "text": node.get("text") or "",
+        "text": " ".join(MENTION.sub("", node.get("text") or "").split()),
         "is_owner": bool(owner_id) and str(user.get("pk") or user.get("id")) == owner_id,
     }
 

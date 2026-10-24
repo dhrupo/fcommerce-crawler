@@ -83,3 +83,10 @@ def test_post_without_time_is_kept():
     text = (FIXTURES / "ig_profile_posts.json").read_text().replace('"taken_at":1775837895', '"taken_at":null', 1)
     c, _ = client([(200, text)])
     assert "3872331137620292903" in {p["item_id"] for p in c.fetch_posts(max_pages=1).items}
+
+
+def test_comment_mentions_stripped():
+    from crawler.instagram.client import parse_comment
+
+    c = parse_comment({"pk": "1", "text": "@rahim.buyer 72k inbox @shop_2", "created_at": 1}, "p", "9")
+    assert c["text"] == "72k inbox"

@@ -116,6 +116,8 @@ class Store:
             for table in ("items", "comments", "comment_reads", "fetch_state"):
                 self._db.execute(f"DELETE FROM {table} WHERE source_id = ?", (row["id"],))
             self._db.execute("DELETE FROM sources WHERE id = ?", (row["id"],))
+        for path in self.raw_dir.glob(f"{row['id']}_*.json.gz"):
+            path.unlink(missing_ok=True)
         return True
 
     def upsert_item(self, source_id, item: dict) -> dict:
@@ -172,6 +174,10 @@ class Store:
                 [(source_id, item_id, c["comment_id"], c.get("created_at"), json.dumps(c)) for c in comments],
             )
 
+    def comments_of_source(self, source_id) -> list[dict]:
+        rows = self._read("SELECT data FROM comments WHERE source_id = ? ORDER BY item_id, created_at", (source_id,))
+        return [json.loads(r["data"]) for r in rows]
+
     def comments_for(self, source_id, item_id) -> list[dict]:
         rows = self._read(
             "SELECT data FROM comments WHERE source_id = ? AND item_id = ? ORDER BY created_at", (source_id, item_id)
@@ -223,12 +229,16 @@ class Store:
         for saved_at, source_id, label, path in self._raw_files():
             if since is not None and saved_at < since:
                 continue
-            with gzip.open(path, "rt", encoding="utf-8") as f:
-                yield source_id, label, f.read()
+            try:
+                with gzip.open(path, "rt", encoding="utf-8") as f:
+                    text = f.read()
+            except FileNotFoundError:
+                continue
+            yield source_id, label, text
 
     def prune_raw(self) -> int:
         cutoff = self._clock() - RAW_KEEP_DAYS * DAY
         old = [path for saved_at, _, _, path in self._raw_files() if saved_at < cutoff]
         for p in old:
-            p.unlink()
+            p.unlink(missing_ok=True)
         return len(old)

@@ -22,7 +22,13 @@ def doc_ids_in_bundle(js: str) -> dict[str, str]:
 
 def scan_doc_ids(transport, config: Config, page_url: str) -> list[dict]:
     """Read a public Page's JS bundles and compare the doc_ids found with the config. Run by hand only."""
-    html = transport.get(page_url, headers={"accept-language": "en-US"}).text
+    from .outcomes import Outcome, classify
+
+    page = transport.get(page_url, headers={"accept-language": "en-US"})
+    if (outcome := classify(page)) is not Outcome.OK:
+        return [{"key": key, "query": query, "config": config.doc_ids.get(key), "found": str(outcome)}
+                for key, query in QUERIES.items()]
+    html = page.text
     found: dict[str, str] = {}
     for encoded in INLINE_JS.findall(html):
         try:
@@ -46,25 +52,46 @@ def live_smoke(transport, config: Config, store, page_url: str = "https://www.fa
     from .facebook.pages import fetch_page_posts
     from .instagram.client import InstagramClient
     from .outcomes import Outcome
+    from .transport import DROPS, HostBlocked
 
-    checks = []
-    outcome, page_id = resolve_page_id(transport, page_url)
-    posts = fetch_page_posts(transport, config, page_id, max_pages=2) if page_id else None
-    checks.append(("fb page posts", posts.outcome if posts else outcome, len(posts.items) if posts else 0))
-    with_comments = next((p for p in (posts.items if posts else []) if (p.get("comment_count") or 0) > 0), None)
-    if with_comments:
-        got = fetch_comments(transport, config, with_comments, with_comments.get("owner_id"))
-        checks.append(("fb comments", got.outcome, len(got.items)))
-    else:
-        checks.append(("fb comments", "no post with comments in the first pages", 0))
-    place = next(iter(config.marketplace_city_ids), None)
-    if place:
+    def attempt(step):
+        try:
+            return step()
+        except HostBlocked:
+            return Outcome.BLOCKED, 0
+        except DROPS:
+            return "network error", 0
+
+    found = {}
+
+    def page_posts():
+        outcome, page_id = resolve_page_id(transport, page_url)
+        if not page_id:
+            return outcome, 0
+        found["posts"] = fetch_page_posts(transport, config, page_id, max_pages=2)
+        return found["posts"].outcome, len(found["posts"].items)
+
+    def comments():
+        posts = found.get("posts")
+        post = next((p for p in (posts.items if posts else []) if (p.get("comment_count") or 0) > 0), None)
+        if not post:
+            return "no post with comments in the first pages", 0
+        got = fetch_comments(transport, config, post, post.get("owner_id"))
+        return got.outcome, len(got.items)
+
+    def marketplace(place):
         got = search_marketplace(transport, config, place, "iphone")
-        checks.append((f"marketplace {place}", got.outcome, len(got.items)))
-    else:
-        checks.append(("marketplace", "no marketplace_city_ids in config", 0))
-    got = InstagramClient(transport, config, ig_username).fetch_posts(max_pages=1)
-    checks.append((f"instagram {ig_username}", got.outcome, len(got.items)))
+        return got.outcome, len(got.items)
+
+    def instagram():
+        got = InstagramClient(transport, config, ig_username).fetch_posts(max_pages=1)
+        return got.outcome, len(got.items)
+
+    place = next(iter(config.marketplace_city_ids), None)
+    checks = [("fb page posts", *attempt(page_posts)), ("fb comments", *attempt(comments)),
+              (f"marketplace {place}", *attempt(lambda: marketplace(place))) if place
+              else ("marketplace", "no marketplace_city_ids in config", 0),
+              (f"instagram {ig_username}", *attempt(instagram))]
 
     passed = 0
     for name, outcome, count in checks:

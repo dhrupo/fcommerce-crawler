@@ -87,3 +87,51 @@ def test_search_prints_one_json_line_per_event(cfg, capsys):
     assert main(["--config", str(cfg), "search", "--place", "Chittagong", "iphone"]) == 0
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [e["outcome"] for e in events] == ["out_of_scope"]
+
+
+def test_bad_since_date_fails_plainly(cfg, capsys):
+    assert main(["--config", str(cfg), "reparse", "--since", "24-10-2026"]) == 1
+    assert "YYYY-MM-DD" in capsys.readouterr().err
+
+
+def test_serve_on_busy_port_fails_plainly(cfg, capsys):
+    import socket
+
+    busy = socket.socket()
+    busy.bind(("127.0.0.1", 0))
+    busy.listen()
+    try:
+        assert main(["--config", str(cfg), "serve", "--port", str(busy.getsockname()[1])]) == 1
+    finally:
+        busy.close()
+    assert "cannot listen" in capsys.readouterr().err
+
+
+def test_fetch_marketplace_source_is_refused(cfg, capsys):
+    store_for(cfg).add_source("marketplace:Sylhet", "fb_marketplace", "Sylhet", None)
+    assert main(["--config", str(cfg), "fetch", "marketplace:Sylhet"]) == 1
+    assert "search" in capsys.readouterr().err
+
+
+def test_sources_add_rejects_unconfigured_category(cfg, capsys):
+    code = main(["--config", str(cfg), "sources", "add", "https://www.facebook.com/x", "--place", "Sylhet",
+                 "--category", "phnoes"])
+    assert code == 1 and "phnoes" in capsys.readouterr().err
+
+
+def test_reparse_reads_streamed_comment_edges(cfg):
+    s = store_for(cfg)
+    src = s.add_source("https://www.facebook.com/iStoreSyl", "fb_page", "Sylhet", "phones")
+    s.upsert_item(src.id, {"item_id": "1496609455589383", "kind": "post", "owner_id": "1"})
+
+    def comment(cid):
+        return {"legacy_fbid": cid, "created_time": 1, "depth": 0, "body": {"text": "price?"},
+                "author": {"id": "u"}, "feedback": {}}
+
+    conn = ("node", "comment_rendering_instance_for_feed_location", "comments")
+    first = {"data": {"node": {"__typename": "Feedback", "id": "ZmVlZGJhY2s6MTQ5NjYwOTQ1NTU4OTM4Mw==",
+                               conn[1]: {"comments": {"edges": [{"node": comment("c1")}], "page_info": {}}}}}}
+    streamed = {"path": [*conn, "edges", 1], "data": {"node": comment("c2")}}
+    s.save_raw(src.id, "comments", json.dumps(first) + "\n" + json.dumps(streamed))
+    assert main(["--config", str(cfg), "reparse", "--since", "2000-01-01"]) == 0
+    assert [c["comment_id"] for c in s.comments_for(src.id, "1496609455589383")] == ["c1", "c2"]

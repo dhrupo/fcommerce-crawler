@@ -138,3 +138,17 @@ def test_bad_content_length_is_400(server):
         status, body = raw_post(url, {**local_headers(url), "Content-Length": value}, body=b"")
         assert status == 400, value
         assert json.loads(body)["error"] == "bad content-length"
+
+
+def test_crash_line_has_the_event_shape(server, monkeypatch):
+    import crawler.api as api_module
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("boom")
+        yield
+
+    monkeypatch.setattr(api_module, "search", broken)
+    url = server(Reader())
+    _, events = post(url, {"place": "Sylhet"})
+    assert events[-1]["outcome"] == "crash"
+    assert {"schema_version", "source", "phase", "items", "detail", "fetched_at"} <= events[-1].keys()

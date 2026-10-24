@@ -88,3 +88,24 @@ def test_remove_source_deletes_its_rows(tmp_path):
     b = s.add_source("https://www.facebook.com/b", "fb_page", "Sylhet", "phones")
     assert s.items_for(b.id, include_expired=True) == [] and s.comments_for(b.id, "p1") == []
     assert s.fetch_state(b.id) is None
+
+
+def test_remove_source_deletes_its_raw_replies(tmp_path):
+    s = Store(tmp_path)
+    a = s.add_source("https://www.facebook.com/a", "fb_page", "Sylhet", "phones")
+    s.save_raw(a.id, "timeline", "OLD SHOP POST")
+    s.remove_source(a.url)
+    s.add_source("https://www.facebook.com/b", "fb_page", "Sylhet", "phones")
+    assert list(s.iter_raw()) == []
+
+
+def test_prune_tolerates_files_already_deleted(tmp_path):
+    now = [1_800_000_000.0 - 31 * DAY]
+    s = Store(tmp_path, clock=lambda: now[0])
+    path = s.save_raw(1, "timeline", "x")
+    now[0] += 31 * DAY
+    listed = s._raw_files()
+    path.unlink()
+    s._raw_files = lambda: listed
+    assert s.prune_raw() == 1
+    assert list(s.iter_raw()) == []

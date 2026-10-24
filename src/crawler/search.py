@@ -13,13 +13,13 @@ from .facebook.comments import COMMENTS, REPLIES, fetch_comments
 from .facebook.comments import parse_comment as parse_fb_comment
 from .facebook.groups import fetch_group_posts
 from .facebook.marketplace import parse_search, search_marketplace
-from .facebook.pages import fetch_page_posts
-from .facebook.parse import parse_feed
+from .facebook.pages import HISTORY_DAYS, fetch_page_posts
+from .facebook.parse import connection_nodes, parse_feed
 from .instagram import client as ig
 from .instagram.client import InstagramClient
 from .outcomes import FetchResult, Outcome, dig, json_documents
 from .store import Source, Store
-from .transport import HostBlocked, Transport
+from .transport import DROPS, HostBlocked, Transport
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +28,9 @@ SCHEMA_VERSION = 1
 PARSER_VERSION = "2026-10-24"
 NO_CHANGES = {"new": False, "edited": False, "sold_changed": False}
 FETCHED = (Outcome.OK, Outcome.NOTHING_NEW)
+NETWORK_ERROR = "network error: could not reach the site"
+_in_flight: dict[tuple[int, int], threading.Event] = {}
+_in_flight_lock = threading.Lock()
 
 
 def source_info(source: Source | None, place=None, category=None) -> dict:
@@ -37,24 +40,37 @@ def source_info(source: Source | None, place=None, category=None) -> dict:
             "category": source.category}
 
 
+def make_event(source: dict, phase: str, outcome, items: list, detail=None, served_from_store=False,
+               fetched_at=None) -> dict:
+    """One NDJSON line: the shape every consumer of search() and POST /search can rely on."""
+    return {"schema_version": SCHEMA_VERSION, "source": source, "phase": phase, "outcome": str(outcome),
+            "items": items, "detail": detail, "served_from_store": served_from_store, "fetched_at": fetched_at}
+
+
 def record(item: dict, source: Source, strategy: str, fetched_at, changes=None) -> dict:
     """One output row: the parsed item plus the fields every consumer can rely on.
 
-    author_id stays in the store for owner detection; in a group it is a private person, so it is never output.
+    The post author stays in the store for owner detection; in a group the author (and the owning profile) is a
+    private person, so neither is output.
     """
-    item = {k: v for k, v in item.items() if k != "author_id"}
+    private = {"author_id", "owner_id"} if source.kind == "fb_group" else {"author_id"}
+    item = {k: v for k, v in item.items() if k not in private}
     return {**item, "schema_version": SCHEMA_VERSION, "source": source.url, "strategy": strategy,
-            "parser_version": PARSER_VERSION, "fetched_at": fetched_at, "changes": changes or NO_CHANGES,
-            "expired": bool(item.get("expired"))}
+            "parser_version": item.get("parser_version") or PARSER_VERSION, "fetched_at": fetched_at,
+            "changes": changes or NO_CHANGES, "expired": bool(item.get("expired"))}
+
+
+def stamped(item: dict) -> dict:
+    return {**item, "parser_version": PARSER_VERSION}
 
 
 class _SourceJob:
-    def __init__(self, store: Store, reader, source: Source, now, emit):
+    def __init__(self, store: Store, reader, source: Source, now, emit, stop: threading.Event | None = None):
         self.store, self.reader, self.source, self.now, self.emit = store, reader, source, now, emit
+        self.stop = stop or threading.Event()
 
     def event(self, phase, outcome, items, detail=None, served_from_store=False):
-        self.emit({"source": source_info(self.source), "phase": phase, "outcome": str(outcome), "items": items,
-                   "detail": detail, "served_from_store": served_from_store, "fetched_at": self.now()})
+        self.emit(make_event(source_info(self.source), phase, outcome, items, detail, served_from_store, self.now()))
 
     def stored_posts(self, strategy, changes=None, fetched_at=None):
         changes = changes or {}
@@ -62,10 +78,29 @@ class _SourceJob:
                 for i in self.store.items_for(self.source.id)]
 
     def stored_comments(self, strategy, fetched_at=None):
+        live = {i["item_id"] for i in self.store.items_for(self.source.id)}
         return [record(c, self.source, strategy, fetched_at)
-                for i in self.store.items_for(self.source.id) for c in self.store.comments_for(self.source.id, i["item_id"])]
+                for c in self.store.comments_of_source(self.source.id) if c.get("item_id") in live]
 
     def run(self, force=False):
+        """One reader per source at a time: a second search waits for the first, then serves what it stored."""
+        if self.stop.is_set():
+            return
+        key = (id(self.store), self.source.id)
+        with _in_flight_lock:
+            busy = _in_flight.get(key)
+            if busy is None:
+                _in_flight[key] = threading.Event()
+        if busy is not None:
+            busy.wait()
+            return self.run(force=False)
+        try:
+            self._run(force)
+        finally:
+            with _in_flight_lock:
+                _in_flight.pop(key).set()
+
+    def _run(self, force):
         state = self.store.fetch_state(self.source.id)
         if not force and state and state.fetched_at and self.now() - state.fetched_at < FRESH_SECONDS:
             strategy = "store"
@@ -81,6 +116,10 @@ class _SourceJob:
             result = self.reader.posts(self.source, state.newest_created_at if state else None)
         except HostBlocked:
             result = FetchResult(Outcome.BLOCKED, [], "host is cooling down after a block")
+        except DROPS as e:
+            log.warning("posts of %s: %s", self.source.url, e)
+            self.fail("posts", Outcome.CRASH, NETWORK_ERROR)
+            return
         except Exception:
             log.exception("posts of %s crashed", self.source.url)
             self.fail("posts", Outcome.CRASH, "reading posts failed; see the crawler log")
@@ -94,7 +133,7 @@ class _SourceJob:
 
     def save_posts(self, result: FetchResult):
         strategy, now = self.reader.strategy, self.now()
-        changes = {p["item_id"]: self.store.upsert_item(self.source.id, p) for p in result.items}
+        changes = {p["item_id"]: self.store.upsert_item(self.source.id, stamped(p)) for p in result.items}
         complete = result.outcome in FETCHED
         # Only a complete read may move "last seen"; after a partial one the older posts are still missing.
         newest = max((p["created_at"] for p in result.items if p.get("created_at")), default=None) if complete else None
@@ -108,17 +147,24 @@ class _SourceJob:
                 or p["comment_count"] > (self.store.comments_read_count(self.source.id, p["item_id"]) or 0)]
         outcome, detail = Outcome.NOTHING_NEW, None
         for post in grew:
+            if self.stop.is_set():
+                break
             try:
                 got = self.reader.comments(self.source, post, self.reader.owner_for(self.source, post))
             except HostBlocked:
                 outcome, detail = Outcome.BLOCKED, "host is cooling down after a block"
+                break
+            except DROPS as e:
+                log.warning("comments of %s on %s: %s", post["item_id"], self.source.url, e)
+                outcome, detail = Outcome.CRASH, NETWORK_ERROR
                 break
             except Exception:
                 log.exception("comments of %s on %s crashed", post["item_id"], self.source.url)
                 outcome, detail = Outcome.CRASH, "reading comments failed; see the crawler log"
                 continue
             self.store.upsert_comments(self.source.id, post["item_id"], got.items)
-            if got.outcome in FETCHED:
+            # Zero comments for a post that counts some is not a complete read: try again next time.
+            if got.outcome in FETCHED and (got.items or not post.get("comment_count")):
                 self.store.set_comments_read(self.source.id, post["item_id"], post.get("comment_count"))
             if got.outcome not in FETCHED:
                 outcome, detail = got.outcome, got.detail
@@ -136,44 +182,48 @@ def _marketplace_job(store: Store, marketplace, place: str, keyword: str, now, e
         result = marketplace(place, keyword)
     except HostBlocked:
         result = FetchResult(Outcome.BLOCKED, [], "host is cooling down after a block")
+    except DROPS as e:
+        log.warning("marketplace search in %s: %s", place, e)
+        result = FetchResult(Outcome.CRASH, [], NETWORK_ERROR)
     except Exception:
         log.exception("marketplace search in %s crashed", place)
         result = FetchResult(Outcome.CRASH, [], "marketplace search failed; see the crawler log")
     fetched_at = now()
-    items = [record(i, source, "fb_marketplace_html", fetched_at, store.upsert_item(source.id, i))
-             for i in result.items]
+    oldest = fetched_at - HISTORY_DAYS * 86400
+    recent = [i for i in result.items if not i.get("created_at") or i["created_at"] >= oldest]
+    items = [record(stamped(i), source, "fb_marketplace_html", fetched_at, store.upsert_item(source.id, stamped(i)))
+             for i in recent]
     store.set_fetch_state(source.id, result.outcome, detail=result.detail)
-    emit({"source": source_info(source), "phase": "posts", "outcome": str(result.outcome), "items": items,
-          "detail": result.detail, "served_from_store": False, "fetched_at": fetched_at})
+    emit(make_event(source_info(source), "posts", result.outcome, items, result.detail, False, fetched_at))
 
 
 def search(config: Config, store: Store, place: str, category: str | None, keyword: str | None = None, *,
            readers: dict, marketplace, now=time.time, workers: int = 4):
     """Stream events ({source, phase, outcome, items, ...}) as each source finishes: posts first, then comments."""
     if not config.has_place(place):
-        yield {"source": source_info(None, place, category), "phase": "posts", "outcome": str(Outcome.OUT_OF_SCOPE),
-               "items": [], "detail": f"{place} is not one of the configured places: {', '.join(config.places)}",
-               "served_from_store": False, "fetched_at": now()}
+        yield out_of_scope(config, place, category, now())
         return
 
     store.expire_old()
     store.prune_raw()
     events: queue.Queue = queue.Queue()
-    done = object()
-    jobs = [_SourceJob(store, readers.get(s.kind), s, now, events.put).run
+    done, stop = object(), threading.Event()
+    jobs = [_SourceJob(store, readers.get(s.kind), s, now, events.put, stop).run
             for s in store.list_sources(place=place, category=category) if s.kind != "fb_marketplace"]
     if keyword:
         jobs.append(lambda: _marketplace_job(store, marketplace, place, keyword, now, events.put))
 
     def guarded(job):
         try:
-            job()
+            if not stop.is_set():
+                job()
         except Exception:
             log.exception("search job crashed")
         finally:
             events.put(done)
 
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+    pool = ThreadPoolExecutor(max_workers=max(1, workers))
+    try:
         for job in jobs:
             pool.submit(guarded, job)
         pending = len(jobs)
@@ -183,10 +233,22 @@ def search(config: Config, store: Store, place: str, category: str | None, keywo
                 pending -= 1
             else:
                 yield event
+    finally:
+        # A caller that stops reading (closed API connection) stops the queued sources too.
+        stop.set()
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
-def fetch_source(store: Store, readers: dict, source: Source, now=time.time) -> list[dict]:
+def out_of_scope(config: Config, place: str, category, fetched_at) -> dict:
+    return make_event(source_info(None, place, category), "posts", Outcome.OUT_OF_SCOPE, [],
+                      f"{place} is not one of the configured places: {', '.join(config.places)}", False, fetched_at)
+
+
+def fetch_source(config: Config, store: Store, readers: dict, source: Source, now=time.time) -> list[dict]:
     """Read one source now, ignoring the 1-hour memory."""
+    if not config.has_place(source.place):
+        return [out_of_scope(config, source.place, source.category, now())]
+    store.expire_old()
     events: list[dict] = []
     _SourceJob(store, readers.get(source.kind), source, now, events.append).run(force=True)
     return events
@@ -309,9 +371,9 @@ def _reparse_comments(store: Store, source: Source, label: str, text: str) -> in
     else:
         connection = COMMENTS if label == "comments" else REPLIES
         item_id, parent = _post_and_parent((dig(data, ("node",)) or {}).get("id") or "")
-        conn = dig(data, connection) or {}
         owner = _owner(store, source, item_id)
-        comments = [parse_fb_comment(e["node"], item_id, owner, parent) for e in conn.get("edges") or [] if e.get("node")]
+        comments = [parse_fb_comment(node, item_id, owner, parent)
+                    for node in connection_nodes(json_documents(text), connection) if node]
     if not item_id or not store.get_item(source.id, item_id):
         return 0
     store.upsert_comments(source.id, item_id, comments)
@@ -341,7 +403,7 @@ def reparse_raw(store: Store, since: float | None = None) -> dict:
             counts["skipped"] += 1
             continue
         for item in items:
-            store.upsert_item(source.id, item)
+            store.upsert_item(source.id, stamped(item))
         counts["posts"] += len(items)
     store.expire_old()
     return counts

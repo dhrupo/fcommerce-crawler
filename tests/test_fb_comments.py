@@ -163,3 +163,8 @@ def test_block_mid_comments_keeps_what_was_read():
     t = Blocking([comments_page([node("c1")], cursor="K")])
     result = fetch_comments(t, Config(places=("Sylhet",)), POST, owner_id=OWNER)
     assert result.outcome is Outcome.BLOCKED and [c["comment_id"] for c in result.items] == ["c1"]
+
+
+def test_empty_comment_page_is_nothing_new():
+    result, _ = run([comments_page([])])
+    assert result.outcome is Outcome.NOTHING_NEW and result.detail

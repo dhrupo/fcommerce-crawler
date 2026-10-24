@@ -126,7 +126,9 @@ def test_crash_detail_has_no_internals(tmp_path):
 
 def test_comments_refetched_only_when_count_grew(tmp_path):
     first = FetchResult(Outcome.OK, [post("p1", comments=2), post("p2", comments=1), post("p3", comments=0)])
-    reader = FakeReader(posts={"https://www.facebook.com/a": first})
+    reader = FakeReader(posts={"https://www.facebook.com/a": first},
+                        comments={"p1": FetchResult(Outcome.OK, [comment("c1", "p1"), comment("c2", "p1")]),
+                                  "p2": FetchResult(Outcome.OK, [comment("c3", "p2")])})
     store, clock = setup(tmp_path, reader)
     run(store, reader, clock=clock)
     assert sorted(reader.comment_calls) == ["p1", "p2"]
@@ -198,7 +200,7 @@ def test_fetch_ignores_one_hour_memory(tmp_path):
     reader = FakeReader(posts={"https://www.facebook.com/a": FetchResult(Outcome.OK, [post("p1")])})
     store, clock = setup(tmp_path, reader)
     run(store, reader, clock=clock)
-    events = fetch_source(store, {"fb_page": reader}, store.get_source("https://www.facebook.com/a"),
+    events = fetch_source(CONFIG, store, {"fb_page": reader}, store.get_source("https://www.facebook.com/a"),
                           now=lambda: clock[0])
     assert len(reader.post_calls) == 2
     assert events[0]["outcome"] == "ok"
@@ -257,3 +259,93 @@ def test_instagram_client_bootstraps_again_for_each_read(tmp_path):
     first = reader.client(src, fresh=True)
     assert reader.client(src) is first
     assert reader.client(src, fresh=True) is not first
+
+
+def test_concurrent_searches_read_a_source_once(tmp_path):
+    entered, release = threading.Event(), threading.Event()
+
+    class Slow(FakeReader):
+        def posts(self, source, newest_seen):
+            self.post_calls.append(source.url)
+            entered.set()
+            release.wait(2)
+            return FetchResult(Outcome.OK, [post("p1")])
+
+    reader = Slow()
+    store, _ = setup(tmp_path, reader)
+    results = []
+    first = threading.Thread(target=lambda: results.append(run(store, reader)))
+    first.start()
+    entered.wait(2)
+    second = threading.Thread(target=lambda: results.append(run(store, reader)))
+    second.start()
+    time.sleep(0.3)  # the second search reaches the source while the first is still reading it
+    release.set()
+    first.join(3)
+    second.join(3)
+    assert len(reader.post_calls) == 1
+    assert all(any(e["items"] for e in events if e["phase"] == "posts") for events in results)
+
+
+def test_closing_the_stream_stops_queued_sources(tmp_path):
+    class Slow(FakeReader):
+        def posts(self, source, newest_seen):
+            time.sleep(0.2)
+            return super().posts(source, newest_seen)
+
+    reader = Slow()
+    store, _ = setup(tmp_path, reader, sources=[(f"https://www.facebook.com/s{i}", "phones") for i in range(6)])
+    stream = search(CONFIG, store, "Sylhet", "phones", readers={"fb_page": reader},
+                    marketplace=lambda place, keyword: FetchResult(Outcome.NOTHING_NEW, []), now=lambda: NOW,
+                    workers=1)
+    next(stream)
+    stream.close()
+    assert len(reader.post_calls) < 6
+
+
+def test_network_error_is_labelled_without_traceback(tmp_path, caplog):
+    from curl_cffi.requests.exceptions import ConnectionError as CurlConnectionError
+
+    class Offline(FakeReader):
+        def posts(self, source, newest_seen):
+            raise CurlConnectionError("Could not resolve host: www.facebook.com")
+
+    reader = Offline()
+    store, _ = setup(tmp_path, reader)
+    event = next(e for e in run(store, reader) if e["phase"] == "posts")
+    assert event["outcome"] == "crash" and event["detail"].startswith("network error")
+    assert not [r for r in caplog.records if r.exc_info]
+
+
+def test_fetch_source_refuses_out_of_scope_and_expires_old(tmp_path):
+    from crawler.search import fetch_source
+
+    reader = FakeReader()
+    store, _ = setup(tmp_path, reader)
+    dhaka = store.add_source("https://www.facebook.com/d", "fb_page", "Dhaka", "phones")
+    events = fetch_source(CONFIG, store, {"fb_page": reader}, dhaka, now=lambda: NOW)
+    assert events[0]["outcome"] == "out_of_scope" and reader.post_calls == []
+    src = store.get_source("https://www.facebook.com/a")
+    store.upsert_item(src.id, post("old", t=NOW - 61 * 86400))
+    events = fetch_source(CONFIG, store, {"fb_page": reader}, src, now=lambda: NOW)
+    assert [i["item_id"] for i in events[0]["items"]] == []
+
+
+def test_zero_comments_for_a_counted_post_is_read_again(tmp_path):
+    reader = FakeReader(posts={"https://www.facebook.com/a": FetchResult(Outcome.OK, [post("p1", comments=5)])},
+                        comments={"p1": FetchResult(Outcome.NOTHING_NEW, [], "no comments visible")})
+    store, clock = setup(tmp_path, reader)
+    run(store, reader, clock=clock)
+    clock[0] += 2 * 3600
+    run(store, reader, clock=clock)
+    assert reader.comment_calls == ["p1", "p1"]
+
+
+def test_marketplace_drops_listings_older_than_60_days(tmp_path):
+    listings = [{"item_id": "new", "kind": "listing", "created_at": NOW - 86400},
+                {"item_id": "old", "kind": "listing", "created_at": NOW - 200 * 86400}]
+    reader = FakeReader()
+    store, _ = setup(tmp_path, reader)
+    events = run(store, reader, keyword="iphone", marketplace=lambda place, keyword: FetchResult(Outcome.OK, listings))
+    mkt = next(e for e in events if e["source"]["kind"] == "fb_marketplace")
+    assert [i["item_id"] for i in mkt["items"]] == ["new"]

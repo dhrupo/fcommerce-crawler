@@ -114,5 +114,7 @@ def fetch_comments(transport, config: Config, post: dict, owner_id: str | None, 
         outcome = walker.comments(feedback_id)
     except HostBlocked:
         outcome = Outcome.BLOCKED
+    if outcome is Outcome.OK and not walker.items:
+        return FetchResult(Outcome.NOTHING_NEW, [], f"comments of {post['item_id']}: none visible logged out")
     detail = None if outcome is Outcome.OK else f"comments of {post['item_id']}: {outcome}"
     return FetchResult(outcome, walker.items, detail)

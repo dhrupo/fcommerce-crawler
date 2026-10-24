@@ -1,9 +1,10 @@
 import json
 import logging
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .config import Config
-from .search import default_marketplace, default_readers, search
+from .search import default_marketplace, default_readers, make_event, search, source_info
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -84,7 +85,9 @@ def make_server(config: Config, store: Store, readers: dict, marketplace, port: 
                 return
             except Exception:
                 log.exception("search request failed")
-                self.wfile.write(b'{"outcome": "crash", "detail": "search failed; see the crawler log"}\n')
+                crash = make_event(source_info(None, fields["place"], fields["category"]), "posts", "crash", [],
+                                   "search failed; see the crawler log", False, time.time())
+                self.wfile.write((json.dumps(crash) + "\n").encode())
 
         def log_message(self, fmt, *args):
             log.info("%s " + fmt, self.address_string(), *args)

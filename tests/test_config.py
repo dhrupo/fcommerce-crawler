@@ -41,3 +41,11 @@ def test_config_overrides_one_doc_id_and_keeps_the_rest(tmp_path):
 def test_rejects_non_positive_rate(tmp_path):
     with pytest.raises(ConfigError, match="per_second"):
         load_config(write(tmp_path, 'places = ["Sylhet"]\n[rates]\nper_second = 0\n'))
+
+
+def test_wrong_value_types_are_config_errors(tmp_path):
+    for body, needle in (('places = ["Sylhet"]\n[rates]\nper_second = "fast"\n', "per_second"),
+                         ('places = "Sylhet"\n', "places"),
+                         ('places = ["Sylhet"]\ndoc_ids = "x"\n', "doc_ids")):
+        with pytest.raises(ConfigError, match=needle):
+            load_config(write(tmp_path, body))
