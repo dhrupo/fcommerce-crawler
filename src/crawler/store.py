@@ -148,9 +148,12 @@ class Store:
         rows = self._read(sql + " ORDER BY created_at DESC", params)
         return [{**json.loads(r["data"]), "expired": bool(r["expired"])} for r in rows]
 
-    def stored_comment_count(self, source_id, item_id) -> int | None:
+    def get_item(self, source_id, item_id) -> dict | None:
         rows = self._read("SELECT data FROM items WHERE source_id = ? AND item_id = ?", (source_id, item_id))
-        return json.loads(rows[0]["data"]).get("comment_count") if rows else None
+        return json.loads(rows[0]["data"]) if rows else None
+
+    def stored_comment_count(self, source_id, item_id) -> int | None:
+        return (self.get_item(source_id, item_id) or {}).get("comment_count")
 
     def upsert_comments(self, source_id, item_id, comments: list[dict]) -> None:
         with self._lock, self._db:

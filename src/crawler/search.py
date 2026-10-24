@@ -1,3 +1,5 @@
+import base64
+import binascii
 import logging
 import queue
 import threading
@@ -7,12 +9,15 @@ from urllib.parse import urlparse
 
 from .config import Config
 from .facebook.bootstrap import group_id_from_url, resolve_page_id
-from .facebook.comments import fetch_comments
+from .facebook.comments import COMMENTS, REPLIES, fetch_comments
+from .facebook.comments import parse_comment as parse_fb_comment
 from .facebook.groups import fetch_group_posts
-from .facebook.marketplace import search_marketplace
+from .facebook.marketplace import parse_search, search_marketplace
 from .facebook.pages import fetch_page_posts
+from .facebook.parse import parse_feed
+from .instagram import client as ig
 from .instagram.client import InstagramClient
-from .outcomes import FetchResult, Outcome
+from .outcomes import FetchResult, Outcome, dig, json_documents
 from .store import Source, Store
 from .transport import HostBlocked, Transport
 
@@ -56,9 +61,9 @@ class _SourceJob:
         return [record(c, self.source, strategy, fetched_at)
                 for i in self.store.items_for(self.source.id) for c in self.store.comments_for(self.source.id, i["item_id"])]
 
-    def run(self):
+    def run(self, force=False):
         state = self.store.fetch_state(self.source.id)
-        if state and state.fetched_at and self.now() - state.fetched_at < FRESH_SECONDS:
+        if not force and state and state.fetched_at and self.now() - state.fetched_at < FRESH_SECONDS:
             strategy = "store"
             self.event("posts", Outcome.CACHED, self.stored_posts(strategy, fetched_at=state.fetched_at),
                        served_from_store=True)
@@ -171,6 +176,13 @@ def search(config: Config, store: Store, place: str, category: str | None, keywo
                 yield event
 
 
+def fetch_source(store: Store, readers: dict, source: Source, now=time.time) -> list[dict]:
+    """Read one source now, ignoring the 1-hour memory."""
+    events: list[dict] = []
+    _SourceJob(store, readers.get(source.kind), source, now, events.append).run(force=True)
+    return events
+
+
 class _Reader:
     def __init__(self, config: Config, transport: Transport, store: Store, now=time.time):
         self.config, self.transport, self.store, self.now = config, transport, store, now
@@ -260,3 +272,66 @@ def default_marketplace(config: Config, transport: Transport, store: Store):
             transport.mark_blocked("https://www.facebook.com/marketplace")
         return result
     return run
+
+
+def _post_and_parent(feedback_id: str) -> tuple[str | None, str | None]:
+    """'feedback:<post>' or 'feedback:<post>_<comment>' -> (post id, parent comment id)."""
+    try:
+        decoded = base64.b64decode(feedback_id).decode()
+    except (binascii.Error, UnicodeDecodeError, TypeError):
+        return None, None
+    post, _, parent = decoded.removeprefix("feedback:").partition("_")
+    return post or None, parent or None
+
+
+def _owner(store: Store, source: Source, item_id) -> str | None:
+    item = store.get_item(source.id, item_id) or {}
+    return item.get("author_id") if source.kind == "fb_group" else item.get("owner_id") or source.native_id
+
+
+def _reparse_comments(store: Store, source: Source, label: str, text: str) -> int:
+    data = (json_documents(text) or [{}])[0].get("data")
+    if label == "ig-post":
+        media = dig(data, ig.MEDIA) or {}
+        item_id = str(media.get("pk") or "")
+        edges = (media.get("comments_connection") or {}).get("edges") or []
+        comments = [ig.parse_comment(e["node"], item_id, _owner(store, source, item_id)) for e in edges if e.get("node")]
+    else:
+        connection = COMMENTS if label == "comments" else REPLIES
+        item_id, parent = _post_and_parent((dig(data, ("node",)) or {}).get("id") or "")
+        conn = dig(data, connection) or {}
+        owner = _owner(store, source, item_id)
+        comments = [parse_fb_comment(e["node"], item_id, owner, parent) for e in conn.get("edges") or [] if e.get("node")]
+    if not item_id or not store.get_item(source.id, item_id):
+        return 0
+    store.upsert_comments(source.id, item_id, comments)
+    return len(comments)
+
+
+def reparse_raw(store: Store, since: float | None = None) -> dict:
+    """Rebuild items and comments from the kept raw replies, e.g. after a parser fix."""
+    sources = {s.id: s for s in store.list_sources()}
+    counts = {"posts": 0, "comments": 0, "skipped": 0}
+    for source_id, label, text in store.iter_raw(since):
+        source = sources.get(source_id)
+        if source is None:
+            counts["skipped"] += 1
+            continue
+        if label in ("timeline", "group"):
+            items = parse_feed(text)
+        elif label == "marketplace":
+            items = parse_search(text)[1]
+        elif label == "ig-posts":
+            conn = dig((json_documents(text) or [{}])[0].get("data"), ig.POSTS) or {}
+            items = [ig.parse_post(e["node"]) for e in conn.get("edges") or [] if (e.get("node") or {}).get("pk")]
+        elif label in ("comments", "replies", "ig-post"):
+            counts["comments"] += _reparse_comments(store, source, label, text)
+            continue
+        else:
+            counts["skipped"] += 1
+            continue
+        for item in items:
+            store.upsert_item(source.id, item)
+        counts["posts"] += len(items)
+    store.expire_old()
+    return counts

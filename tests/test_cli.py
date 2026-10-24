@@ -1,0 +1,89 @@
+import json
+from pathlib import Path
+
+import pytest
+
+from crawler.cli import main
+from crawler.store import Store
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture
+def cfg(tmp_path):
+    p = tmp_path / "crawler.toml"
+    p.write_text('places = ["Sylhet"]\ncategories = ["phones"]\ndata_dir = "data"\n')
+    return p
+
+
+def store_for(cfg):
+    return Store(cfg.parent / "data")
+
+
+def test_sources_add_requires_place_and_category(cfg, capsys):
+    with pytest.raises(SystemExit) as e:
+        main(["--config", str(cfg), "sources", "add", "https://www.facebook.com/iStoreSyl"])
+    assert e.value.code == 2
+    with pytest.raises(SystemExit):
+        main(["--config", str(cfg), "sources", "add", "https://www.facebook.com/iStoreSyl", "--place", "Sylhet"])
+    assert store_for(cfg).list_sources() == []
+
+
+def test_sources_add_rejects_unconfigured_place(cfg, capsys):
+    code = main(["--config", str(cfg), "sources", "add", "https://www.facebook.com/x", "--place", "Dhaka",
+                 "--category", "phones"])
+    assert code == 1 and "Dhaka" in capsys.readouterr().err
+
+
+def test_sources_add_detects_kind_and_rejects_vanity_group(cfg, capsys):
+    base = ["--config", str(cfg), "sources", "add"]
+    tail = ["--place", "Sylhet", "--category", "phones"]
+    assert main([*base, "https://www.facebook.com/iStoreSyl", *tail]) == 0
+    assert main([*base, "https://www.instagram.com/some.shop/", *tail]) == 0
+    assert main([*base, "https://www.facebook.com/groups/392585550772135/", *tail]) == 0
+    assert main([*base, "https://www.facebook.com/groups/sylhet.mobile", *tail]) == 1
+    kinds = {s.url: s.kind for s in store_for(cfg).list_sources()}
+    assert sorted(kinds.values()) == ["fb_group", "fb_page", "ig_profile"]
+    capsys.readouterr()
+    assert main(["--config", str(cfg), "sources", "list"]) == 0
+    assert "iStoreSyl" in capsys.readouterr().out
+    assert main(["--config", str(cfg), "sources", "remove", "https://www.instagram.com/some.shop/"]) == 0
+    assert len(store_for(cfg).list_sources()) == 2
+
+
+def test_status_shows_last_outcome_per_source(cfg, capsys):
+    s = store_for(cfg)
+    a = s.add_source("https://www.facebook.com/a", "fb_page", "Sylhet", "phones")
+    s.add_source("https://www.facebook.com/b", "fb_page", "Sylhet", "phones")
+    s.set_fetch_state(a.id, "blocked", detail="page 1: blocked")
+    capsys.readouterr()
+    assert main(["--config", str(cfg), "status"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    row_a = next(line for line in lines if "/a" in line)
+    row_b = next(line for line in lines if "/b" in line)
+    assert "blocked" in row_a and "page 1: blocked" in row_a
+    assert "never fetched" in row_b
+
+
+def test_reparse_rebuilds_from_raw(cfg, capsys):
+    s = store_for(cfg)
+    src = s.add_source("https://www.facebook.com/iStoreSyl", "fb_page", "Sylhet", "phones")
+    s.save_raw(src.id, "timeline", (FIXTURES / "fb_timeline_p1.json").read_text())
+    s.save_raw(src.id, "comments", (FIXTURES / "fb_comments_owner.json").read_text())
+    s.save_raw(src.id, "replies", (FIXTURES / "fb_replies.json").read_text())
+    assert main(["--config", str(cfg), "reparse", "--since", "2000-01-01"]) == 0
+    items = {i["item_id"] for i in s.items_for(src.id, include_expired=True)}
+    assert {"1659016182682042", "1645604120689915", "1632044745379186"} <= items
+    s.upsert_item(src.id, {"item_id": "1496609455589383", "kind": "post", "owner_id": "100057210291191"})
+    assert main(["--config", str(cfg), "reparse", "--since", "2000-01-01"]) == 0
+    comments = s.comments_for(src.id, "1496609455589383")
+    assert len(comments) == 8
+    reply = next(c for c in comments if c["depth"] == 1)
+    assert reply["parent_id"] == "26066920936340147" and reply["is_owner"] is True
+    assert "rebuilt" in capsys.readouterr().out
+
+
+def test_search_prints_one_json_line_per_event(cfg, capsys):
+    assert main(["--config", str(cfg), "search", "--place", "Chittagong", "iphone"]) == 0
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [e["outcome"] for e in events] == ["out_of_scope"]

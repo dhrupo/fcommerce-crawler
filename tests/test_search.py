@@ -190,3 +190,15 @@ def test_sources_are_read_in_parallel(tmp_path):
     t0 = time.monotonic()
     run(store, reader)
     assert len(started) == 2 and time.monotonic() - t0 < 1.5
+
+
+def test_fetch_ignores_one_hour_memory(tmp_path):
+    from crawler.search import fetch_source
+
+    reader = FakeReader(posts={"https://www.facebook.com/a": FetchResult(Outcome.OK, [post("p1")])})
+    store, clock = setup(tmp_path, reader)
+    run(store, reader, clock=clock)
+    events = fetch_source(store, {"fb_page": reader}, store.get_source("https://www.facebook.com/a"),
+                          now=lambda: clock[0])
+    assert len(reader.post_calls) == 2
+    assert events[0]["outcome"] == "ok"
