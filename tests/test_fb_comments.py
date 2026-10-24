@@ -122,3 +122,10 @@ def test_broken_comment_page_is_reported():
 def test_missing_feedback_id_is_built_from_post_id():
     _, t = run([comments_page([])], post={"item_id": "1496609455589383", "feedback_id": None, "owner_id": OWNER})
     assert t.sent[0][1]["id"] == "ZmVlZGJhY2s6MTQ5NjYwOTQ1NTU4OTM4Mw=="
+
+
+def test_transient_error_on_comments_is_retried():
+    transient = json.dumps({"errors": [{"code": 1675012, "severity": "CRITICAL",
+                                        "message": "missing_required_variable_value"}]})
+    result, _ = run([transient, comments_page([node("c1")])])
+    assert result.outcome is Outcome.OK and [c["comment_id"] for c in result.items] == ["c1"]

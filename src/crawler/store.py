@@ -187,7 +187,8 @@ class Store:
             "VALUES (?,?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET last_outcome=excluded.last_outcome, "
             "attempted_at=excluded.attempted_at, detail=excluded.detail, "
             "fetched_at=COALESCE(excluded.fetched_at, fetched_at), "
-            "newest_created_at=MAX(COALESCE(excluded.newest_created_at, 0), COALESCE(newest_created_at, 0))",
+            "newest_created_at=CASE WHEN excluded.newest_created_at IS NULL THEN newest_created_at "
+            "ELSE MAX(excluded.newest_created_at, COALESCE(newest_created_at, 0)) END",
             (source_id, str(outcome), now, now if good else None, newest_created_at, detail),
         )
 

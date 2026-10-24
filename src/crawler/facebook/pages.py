@@ -6,6 +6,8 @@ from ..outcomes import FetchResult, Outcome, classify, json_documents
 from .parse import find_stories, next_cursor, parse_story
 
 GRAPHQL_URL = "https://www.facebook.com/api/graphql/"
+TRANSIENT_CODES = {1675012}
+TRIES = 3
 CONNECTION = ("node", "timeline_list_feed_units")
 HISTORY_DAYS = 60
 MAX_PAGES = 200
@@ -57,6 +59,25 @@ def headers(referer: str, friendly_name: str) -> dict:
     }
 
 
+def is_transient(text: str) -> bool:
+    """FB's intermittent "missing_required_variable_value" failure: no data, and the same request works on retry."""
+    docs = json_documents(text)
+    return bool(docs) and all(d.get("data") is None for d in docs) and any(
+        e.get("code") in TRANSIENT_CODES for d in docs for e in d.get("errors") or [] if isinstance(e, dict))
+
+
+def ask_graphql(transport, form: dict, head: dict, connection, label: str, on_raw=None):
+    """POST one GraphQL page; repeat only FB's known transient failure, never a block."""
+    for _ in range(TRIES):
+        response = transport.post(GRAPHQL_URL, data=form, headers=head)
+        if on_raw:
+            on_raw(label, response.text)
+        outcome = classify(response, connection)
+        if outcome is not Outcome.SCHEMA_CHANGED or not is_transient(response.text):
+            break
+    return outcome, response
+
+
 def crossed_boundary(is_fresh: list[bool]) -> bool:
     """True once an old post follows a fresh one; a pinned old post sits before them and does not count."""
     if True not in is_fresh:
@@ -70,10 +91,8 @@ def fetch_feed(transport, *, doc_id: str, friendly: str, referer: str, connectio
     head = headers(referer, friendly)
     items, cursor = [], None
     for page_number in range(1, max_pages + 1):
-        response = transport.post(GRAPHQL_URL, data=graphql_form(doc_id, friendly, variables_for(cursor)), headers=head)
-        if on_raw:
-            on_raw(label, response.text)
-        outcome = classify(response, connection)
+        outcome, response = ask_graphql(transport, graphql_form(doc_id, friendly, variables_for(cursor)), head,
+                                        connection, label, on_raw)
         if outcome is Outcome.NOTHING_NEW:
             break
         if outcome is not Outcome.OK:
@@ -86,7 +105,9 @@ def fetch_feed(transport, *, doc_id: str, friendly: str, referer: str, connectio
         cursor = next_cursor(docs, connection)
         if not cursor or (newest_first and crossed_boundary(is_fresh)):
             break
-    return FetchResult(Outcome.OK if items else Outcome.NOTHING_NEW, items)
+    if not items:
+        return FetchResult(Outcome.NOTHING_NEW, [], "no posts newer than the 60-day limit or the last post seen")
+    return FetchResult(Outcome.OK, items)
 
 
 def history_start(now: float, newest_seen: float | None) -> float:

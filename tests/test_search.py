@@ -202,3 +202,25 @@ def test_fetch_ignores_one_hour_memory(tmp_path):
                           now=lambda: clock[0])
     assert len(reader.post_calls) == 2
     assert events[0]["outcome"] == "ok"
+
+
+def test_partial_read_does_not_advance_last_seen_and_still_reads_comments(tmp_path):
+    partial = FetchResult(Outcome.SCHEMA_CHANGED, [post("p1", t=NOW - 60, comments=1)], "page 11: schema_changed")
+    reader = FakeReader(posts={"https://www.facebook.com/a": partial},
+                        comments={"p1": FetchResult(Outcome.OK, [comment("c1", "p1")])})
+    store, clock = setup(tmp_path, reader)
+    events = [e for e in run(store, reader, clock=clock) if e["source"]["kind"] == "fb_page"]
+    assert [(e["phase"], e["outcome"]) for e in events] == [("posts", "schema_changed"), ("comments", "ok")]
+    assert reader.comment_calls == ["p1"]
+    src = store.get_source("https://www.facebook.com/a")
+    assert store.fetch_state(src.id).newest_created_at is None
+    run(store, reader, clock=clock)
+    assert reader.post_calls[1] == ("https://www.facebook.com/a", None)
+
+
+def test_blocked_read_skips_comments(tmp_path):
+    blocked = FetchResult(Outcome.BLOCKED, [post("p1", comments=1)], "page 2: blocked")
+    reader = FakeReader(posts={"https://www.facebook.com/a": blocked})
+    store, _ = setup(tmp_path, reader)
+    events = [e for e in run(store, reader) if e["source"]["kind"] == "fb_page"]
+    assert events[1]["outcome"] == "blocked" and reader.comment_calls == []

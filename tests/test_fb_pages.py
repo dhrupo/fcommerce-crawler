@@ -98,3 +98,33 @@ def test_raw_replies_handed_to_store():
     saved = []
     fetch([page([("a", NOW)], cursor=None)], on_raw=lambda label, text: saved.append(label))
     assert saved == ["timeline"]
+
+
+TRANSIENT = json.dumps({"errors": [{"message": "A server error missing_required_variable_value occured.",
+                                    "severity": "CRITICAL", "code": 1675012,
+                                    "summary": "Your request couldn't be processed"}]})
+
+
+def test_transient_fb_error_is_retried():
+    result, t = fetch([TRANSIENT, page([("a", NOW)], cursor=None)])
+    assert result.outcome is Outcome.OK and [p["item_id"] for p in result.items] == ["a"]
+    assert t.cursors == [None, None]
+
+
+def test_transient_fb_error_three_times_is_schema_changed():
+    result, t = fetch([TRANSIENT, TRANSIENT, TRANSIENT, page([("never", NOW)])])
+    assert result.outcome is Outcome.SCHEMA_CHANGED
+    assert len(t.cursors) == 3
+
+
+def test_rate_limit_error_is_not_retried():
+    limited = json.dumps({"errors": [{"code": 1675004, "summary": "Rate limit exceeded", "severity": "CRITICAL"}]})
+    result, t = fetch([limited, page([("a", NOW)])])
+    assert result.outcome is Outcome.BLOCKED
+    assert len(t.cursors) == 1
+
+
+def test_first_read_with_no_recent_posts_says_why():
+    result, _ = fetch([page([("old", NOW - 400 * DAY)])])
+    assert result.outcome is Outcome.NOTHING_NEW
+    assert "no posts" in result.detail

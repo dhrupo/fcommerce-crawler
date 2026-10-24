@@ -92,11 +92,12 @@ class _SourceJob:
         strategy, now = self.reader.strategy, self.now()
         before = {p["item_id"]: self.store.stored_comment_count(self.source.id, p["item_id"]) for p in result.items}
         changes = {p["item_id"]: self.store.upsert_item(self.source.id, p) for p in result.items}
-        newest = max((p["created_at"] for p in result.items if p.get("created_at")), default=None)
+        complete = result.outcome in FETCHED
+        # Only a complete read may move "last seen"; after a partial one the older posts are still missing.
+        newest = max((p["created_at"] for p in result.items if p.get("created_at")), default=None) if complete else None
         self.store.set_fetch_state(self.source.id, result.outcome, newest_created_at=newest, detail=result.detail)
-        served = result.outcome not in FETCHED
-        self.event("posts", result.outcome, self.stored_posts(strategy, changes, now), result.detail, served)
-        if served:
+        self.event("posts", result.outcome, self.stored_posts(strategy, changes, now), result.detail, not complete)
+        if result.outcome is Outcome.BLOCKED or not result.items:
             self.event("comments", result.outcome, self.stored_comments(strategy, now), result.detail, True)
             return
 

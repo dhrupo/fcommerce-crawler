@@ -1,8 +1,8 @@
 import base64
 
 from ..config import Config
-from ..outcomes import FetchResult, Outcome, classify, json_documents
-from .pages import GRAPHQL_URL, graphql_form, headers
+from ..outcomes import FetchResult, Outcome, json_documents
+from .pages import ask_graphql, graphql_form, headers
 from .parse import next_cursor
 
 COMMENTS = ("node", "comment_rendering_instance_for_feed_location", "comments")
@@ -59,12 +59,9 @@ class _Walker:
         self.items: list[dict] = []
 
     def _ask(self, doc_key, friendly, variables, connection, label):
-        response = self.transport.post(
-            GRAPHQL_URL, data=graphql_form(self.config.doc_ids[doc_key], friendly, variables),
-            headers=headers(f"https://www.facebook.com/{self.item_id}", friendly))
-        if self.on_raw:
-            self.on_raw(label, response.text)
-        outcome = classify(response, connection)
+        outcome, response = ask_graphql(
+            self.transport, graphql_form(self.config.doc_ids[doc_key], friendly, variables),
+            headers(f"https://www.facebook.com/{self.item_id}", friendly), connection, label, self.on_raw)
         docs = json_documents(response.text) if outcome is Outcome.OK else []
         return outcome, docs
 
