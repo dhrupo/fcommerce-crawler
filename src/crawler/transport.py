@@ -1,3 +1,4 @@
+import logging
 import random
 import re
 import threading
@@ -10,6 +11,8 @@ from curl_cffi.requests.exceptions import Timeout as CurlTimeout
 
 from .config import Config
 from .sessions import SITES, SessionStore, site_of
+
+log = logging.getLogger(__name__)
 
 TIMEOUT_SECONDS = 30
 FB_HOME = "https://www.facebook.com/"
@@ -111,6 +114,7 @@ class Transport:
                 self._start_login(limiter, site)
             else:
                 self._cool_down(limiter, "cooldown")
+            log.info("%s blocked: %s", host_key(url), limiter.last_report)
             return limiter.last_report
 
     def request(self, method: str, url: str, **kwargs):
