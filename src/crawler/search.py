@@ -107,7 +107,7 @@ class _SourceJob:
 
         grew = [p for p in result.items
                 if p.get("comment_count") is None or p["comment_count"] > (before.get(p["item_id"]) or 0)]
-        outcome, detail = (Outcome.OK if grew else Outcome.NOTHING_NEW), None
+        outcome, detail = Outcome.NOTHING_NEW, None
         for post in grew:
             try:
                 got = self.reader.comments(self.source, post, self.reader.owner_for(self.source, post))
@@ -123,6 +123,8 @@ class _SourceJob:
                 outcome, detail = got.outcome, got.detail
                 if got.outcome is Outcome.BLOCKED:
                     break
+            elif got.outcome is Outcome.OK and outcome is Outcome.NOTHING_NEW:
+                outcome = Outcome.OK
         self.event("comments", outcome, self.stored_comments(strategy, now), detail, outcome not in FETCHED)
 
 
