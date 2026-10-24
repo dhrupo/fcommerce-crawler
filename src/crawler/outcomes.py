@@ -11,10 +11,12 @@ class Outcome(StrEnum):
     SCHEMA_CHANGED = "schema_changed"
     GONE = "gone"
     OUT_OF_SCOPE = "out_of_scope"
+    LOGIN_EXPIRED = "login_expired"
     CRASH = "crash"
 
 
 BLOCK_CODES = {1675004}
+LOGIN_REQUIRED_CODES = {1357001}
 LOGIN_URL_PARTS = ("/login", "/accounts/login", "/checkpoint")
 HTML_BLOCK_MARKERS = ("CometErrorRoot", "blocked by our security", "temporarily blocked")
 
@@ -61,7 +63,8 @@ def classify(response, connection: tuple[str, ...] | None = None) -> Outcome:
 
     docs = json_documents(text)
     errors = [e for d in docs for e in (d.get("errors") or []) if isinstance(e, dict)]
-    if any(e.get("code") in BLOCK_CODES for e in errors) or any(d.get("require_login") for d in docs):
+    if (any(e.get("code") in BLOCK_CODES for e in errors) or any(d.get("require_login") for d in docs)
+            or any(d.get("error") in LOGIN_REQUIRED_CODES for d in docs)):
         return Outcome.BLOCKED
 
     found = next((dig(d.get("data"), connection) for d in docs if "path" not in d), None)

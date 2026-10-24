@@ -5,6 +5,7 @@ import pytest
 from curl_cffi.requests.exceptions import ConnectionError as CurlConnectionError
 
 from crawler.config import Config
+from crawler.sessions import SessionStore
 from crawler.transport import HostBlocked, Transport
 
 FB = "https://www.facebook.com/api/graphql/"
@@ -156,3 +157,169 @@ def test_cooldown_started_while_waiting_stops_the_request():
     with pytest.raises(HostBlocked):
         t.post(FB, data={})
     assert len(session.calls) == 1
+
+
+FB_COOKIES = ".facebook.com\tTRUE\t/\tTRUE\t1893456000\tc_user\t1000001\n" \
+             ".facebook.com\tTRUE\t/\tTRUE\t1893456000\txs\tPLANTED-XS\n"
+HOME = '<script>["DTSGInitialData",[],{"token":"DTSG1"},258]</script>'
+
+
+class FakeCookies(dict):
+    def set(self, name, value, domain=None):
+        self[name] = value
+
+
+class RecordingSession:
+    def __init__(self, handler):
+        self.cookies = FakeCookies()
+        self.calls = []
+        self.handler = handler
+
+    def request(self, method, url, **kwargs):
+        self.calls.append((method, url, kwargs))
+        return self.handler(self, method, url, kwargs)
+
+
+def login_transport(tmp_path, handler=None, with_session=True):
+    clock = FakeClock()
+    sessions = SessionStore(tmp_path, clock=clock.time)
+    if with_session:
+        sessions.import_export("fb", FB_COOKIES)
+    made = []
+
+    def default(session, method, url, kwargs):
+        text = HOME if method == "GET" and url == "https://www.facebook.com/" else "{}"
+        return SimpleNamespace(status_code=200, text=text, url=url)
+
+    def factory():
+        made.append(RecordingSession(handler or default))
+        return made[-1]
+
+    t = Transport(Config(places=("Sylhet",)), session_factory=factory, clock=clock.time, sleep=clock.sleep,
+                  jitter=lambda lo, hi: 1.0, sessions=sessions)
+    return t, made, clock, sessions
+
+
+def form():
+    return {"av": "0", "__user": "0", "fb_dtsg": "", "doc_id": "1", "variables": "{}"}
+
+
+def test_no_session_never_sends_cookies(tmp_path):
+    t, made, _, _ = login_transport(tmp_path, with_session=False)
+    t.post(FB, data=form())
+    assert t.report_block(FB) == "cooldown"
+    assert len(made) == 1 and made[0].cookies == {}
+    assert made[0].calls[0][2]["data"]["av"] == "0" and made[0].calls[0][2]["data"]["fb_dtsg"] == ""
+
+
+def test_block_without_session_cools_down(tmp_path):
+    t, _, _, _ = login_transport(tmp_path, with_session=False)
+    assert t.report_block(FB) == "cooldown"
+    with pytest.raises(HostBlocked):
+        t.post(FB, data=form())
+
+
+def test_block_switches_to_login_when_session_exists(tmp_path):
+    t, made, clock, sessions = login_transport(tmp_path)
+    t.post(FB, data=form())
+    assert t.report_block(FB) == "login"
+    t.post(FB, data=form())
+    anonymous, logged_in = made
+    assert anonymous.cookies == {}
+    assert logged_in.cookies["xs"] == "PLANTED-XS"
+    assert sessions.state("fb") == "in use"
+    assert spacing(t, clock, FB) == pytest.approx(0.5)
+
+
+def test_login_mode_fills_fb_form_identity(tmp_path):
+    t, made, _, _ = login_transport(tmp_path)
+    t.report_block(FB)
+    sent_form = form()
+    t.post(FB, data=sent_form)
+    calls = made[0].calls
+    assert calls[0][:2] == ("GET", "https://www.facebook.com/")
+    data = calls[1][2]["data"]
+    assert (data["av"], data["__user"], data["fb_dtsg"]) == ("1000001", "1000001", "DTSG1")
+    assert sent_form["av"] == "0"
+    t.post(FB, data=form())
+    assert [c[0] for c in calls] == ["GET", "POST", "POST"]
+
+
+def test_stale_fb_dtsg_is_refetched_once(tmp_path):
+    tokens = iter(["OLD", "NEW", "NEWER"])
+
+    def handler(session, method, url, kwargs):
+        if method == "GET":
+            return SimpleNamespace(status_code=200, url=url,
+                                   text=f'["DTSGInitialData",[],{{"token":"{next(tokens)}"}},1]')
+        stale = kwargs["data"]["fb_dtsg"] != "NEW"
+        return SimpleNamespace(status_code=200, url=url, text='for (;;);{"error":1357004}' if stale else "{}")
+
+    t, made, _, _ = login_transport(tmp_path, handler)
+    t.report_block(FB)
+    assert t.post(FB, data=form()).text == "{}"
+    assert [c[0] for c in made[0].calls] == ["GET", "POST", "GET", "POST"]
+
+
+def test_stale_fb_dtsg_twice_is_not_looped(tmp_path):
+    def handler(session, method, url, kwargs):
+        text = '["DTSGInitialData",[],{"token":"T"},1]' if method == "GET" else 'for (;;);{"error":1357004}'
+        return SimpleNamespace(status_code=200, url=url, text=text)
+
+    t, made, _, _ = login_transport(tmp_path, handler)
+    t.report_block(FB)
+    t.post(FB, data=form())
+    assert [c[0] for c in made[0].calls] == ["GET", "POST", "GET", "POST"]
+
+
+def test_block_while_logged_in_expires_session_and_cools_down(tmp_path):
+    t, _, _, sessions = login_transport(tmp_path)
+    assert t.report_block(FB) == "login"
+    assert t.report_block(FB) == "expired"
+    assert sessions.state("fb") == "expired"
+    with pytest.raises(HostBlocked):
+        t.post(FB, data=form())
+
+
+def test_login_mode_ends_after_window(tmp_path):
+    t, made, clock, sessions = login_transport(tmp_path)
+    t.report_block(FB)
+    clock.now += t.login_seconds + 1
+    t.post(FB, data=form())
+    assert made[-1].cookies == {} and made[-1].calls[-1][2]["data"]["av"] == "0"
+    assert sessions.state("fb") == "ready"
+
+
+def test_429_with_session_switches_once_not_twice(tmp_path):
+    replies = iter([SimpleNamespace(status_code=429, text="", url=FB)])
+
+    def handler(session, method, url, kwargs):
+        if method == "GET":
+            return SimpleNamespace(status_code=200, url=url, text=HOME)
+        return next(replies, SimpleNamespace(status_code=200, text="{}", url=url))
+
+    t, _, _, sessions = login_transport(tmp_path, handler)
+    token = t.mode_token(FB)
+    assert t.post(FB, data=form()).status_code == 429
+    assert t.report_block(FB, token) == "login"
+    assert sessions.state("fb") == "in use"
+    assert t.post(FB, data=form()).status_code == 200
+
+
+def test_instagram_cookie_comes_from_the_session_in_use(tmp_path):
+    t, made, _, sessions = login_transport(tmp_path, with_session=False)
+    sessions.import_export("ig", '[{"domain":".instagram.com","name":"sessionid","value":"S"},'
+                                 '{"domain":".instagram.com","name":"csrftoken","value":"LOGGED-CSRF"}]')
+    t.get(IG)
+    made[0].cookies["csrftoken"] = "ANON-CSRF"
+    assert t.cookie(IG, "csrftoken") == "ANON-CSRF"
+    t.report_block(IG)
+    assert t.cookie(IG, "csrftoken") == "LOGGED-CSRF"
+
+
+def test_parallel_block_reports_switch_once(tmp_path):
+    t, _, _, sessions = login_transport(tmp_path)
+    token = t.mode_token(FB)
+    assert t.report_block(FB, token) == "login"
+    assert t.report_block(FB, token) == "login"
+    assert sessions.state("fb") == "in use"
