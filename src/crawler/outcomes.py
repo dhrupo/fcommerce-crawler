@@ -44,6 +44,17 @@ def dig(obj, path):
     return obj
 
 
+def rate_limited(response) -> bool:
+    """"Slow down", as HTTP 429 or a 1675004 error inside a 200 reply."""
+    if response.status_code == 429:
+        return True
+    text = response.text or ""
+    if "1675004" not in text[:5000]:
+        return False
+    return any(isinstance(e, dict) and e.get("code") in BLOCK_CODES
+               for d in json_documents(text[:5000]) for e in d.get("errors") or [])
+
+
 def classify(response, connection: tuple[str, ...] | None = None) -> Outcome:
     """Label a raw reply. `connection` is the key path under `data` that must hold the result."""
     status = response.status_code

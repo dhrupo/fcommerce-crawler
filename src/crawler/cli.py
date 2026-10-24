@@ -71,7 +71,10 @@ def fail(message: str) -> int:
 
 
 def main(argv=None, transport_factory=None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command == "doctor" and args.login and not args.live:
+        parser.error("doctor --login needs --live: it runs the live smoke check with the imported logins")
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:
         config = load_config(Path(args.config))

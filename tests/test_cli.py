@@ -180,3 +180,9 @@ def test_cli_transport_gets_the_session_store(cfg, monkeypatch):
     with pytest.raises(SystemExit):
         main(["--config", str(cfg), "search", "--place", "Sylhet", "x"], transport_factory=factory)
     assert seen["sessions"] is not None
+
+
+def test_doctor_login_requires_live(cfg, capsys):
+    with pytest.raises(SystemExit) as e:
+        main(["--config", str(cfg), "doctor", "--login"])
+    assert e.value.code == 2 and "--live" in capsys.readouterr().err

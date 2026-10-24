@@ -65,6 +65,40 @@ def test_live_smoke_survives_a_host_block(tmp_path, capsys):
         def cookie(self, url, name):
             return None
 
+        def mode_token(self, url):
+            return (0, False)
+
+        def report_block(self, url, token=None):
+            return "cooldown"
+
     config = Config(places=("Sylhet",), marketplace_city_ids={"Sylhet": "1"})
     assert live_smoke(T(), config, Store(tmp_path)) is False
     assert "tested 0 of 4 passed" in capsys.readouterr().out
+
+
+def test_live_smoke_expires_a_refused_login(tmp_path, capsys):
+    from crawler.doctor import live_smoke
+    from crawler.store import Store
+
+    reports = []
+
+    class T:
+        def get(self, url, **kw):
+            return SimpleNamespace(status_code=200, url="https://www.facebook.com/checkpoint/?next=x", text="")
+
+        post = get
+
+        def cookie(self, url, name):
+            return None
+
+        def mode_token(self, url):
+            return (0, True)
+
+        def report_block(self, url, token=None):
+            reports.append(url)
+            return "expired"
+
+    config = Config(places=("Sylhet",), marketplace_city_ids={"Sylhet": "1"})
+    live_smoke(T(), config, Store(tmp_path))
+    out = capsys.readouterr().out
+    assert reports and "login_expired" in out

@@ -356,7 +356,7 @@ def test_rate_limit_while_logged_in_cools_down_without_expiring(tmp_path):
     assert t.report_block(FB, token) == "cooldown" and sessions.state("fb") != "expired"
 
 
-def test_missing_fb_dtsg_is_not_cached(tmp_path):
+def test_missing_fb_dtsg_is_fetched_once_per_login(tmp_path):
     pages = iter(["<html>checkpoint</html>", HOME])
 
     def handler(session, method, url, kwargs):
@@ -369,7 +369,8 @@ def test_missing_fb_dtsg_is_not_cached(tmp_path):
     t.post(FB, data=form())
     t.post(FB, data=form())
     posts = [c for c in made[0].calls if c[0] == "POST"]
-    assert [p[2]["data"]["fb_dtsg"] for p in posts] == ["", "DTSG1"]
+    assert [p[2]["data"]["fb_dtsg"] for p in posts] == ["", ""]
+    assert [c[0] for c in made[0].calls].count("GET") == 1
 
 
 def test_refusal_of_a_logged_in_request_after_the_window_expires_the_login(tmp_path):
@@ -414,9 +415,61 @@ def test_old_logged_in_sessions_are_dropped(tmp_path):
 
 
 def test_late_refusal_of_a_logged_in_request_still_expires_the_login(tmp_path):
+    import threading
+
     t, _, clock, sessions = login_transport(tmp_path)
     t.report_block(FB)
-    in_flight = t.mode_token(FB)
+    token = t.mode_token(FB)
+    t.post(FB, data=form())  # this thread's request went out logged in and was refused
     clock.now += t.login_seconds + 1
-    t.post(FB, data=form())  # a later, logged-out request
-    assert t.report_block(FB, in_flight) == "expired" and sessions.state("fb") == "expired"
+    other = threading.Thread(target=lambda: t.post(FB, data=form()))  # another thread, logged out
+    other.start()
+    other.join()
+    assert t.report_block(FB, token) == "expired" and sessions.state("fb") == "expired"
+
+
+def test_block_on_a_request_sent_after_the_window_does_not_expire(tmp_path):
+    t, _, clock, sessions = login_transport(tmp_path)
+    t.force_login(FB)
+    token = t.mode_token(FB)
+    clock.now += t.login_seconds + 1
+    t.post(FB, data=form())  # the window ran out: this one went out logged out
+    assert t.report_block(FB, token) != "expired" and sessions.state("fb") != "expired"
+
+
+def test_expired_label_only_for_the_thread_that_sent_the_login(tmp_path):
+    import threading
+
+    t, _, _, _ = login_transport(tmp_path)
+    t.report_block(FB)
+    t.post(FB, data=form())
+    assert t.report_block(FB, t.mode_token(FB)) == "expired"
+    seen = []
+    other = threading.Thread(target=lambda: seen.append(t.report_block(FB)))
+    other.start()
+    other.join()
+    assert seen == ["cooldown"]
+
+
+def test_rate_limit_json_with_spaces_keeps_the_login(tmp_path):
+    def handler(session, method, url, kwargs):
+        if method == "GET":
+            return SimpleNamespace(status_code=200, url=url, text=HOME)
+        return SimpleNamespace(status_code=200, url=url,
+                               text='{"errors": [{"code": 1675004, "summary": "Rate limit exceeded"}]}')
+
+    t, _, _, sessions = login_transport(tmp_path, handler)
+    t.report_block(FB)
+    token = t.mode_token(FB)
+    t.post(FB, data=form())
+    assert t.report_block(FB, token) == "cooldown" and sessions.state("fb") != "expired"
+
+
+def test_logout_stops_a_running_login(tmp_path):
+    t, made, _, sessions = login_transport(tmp_path)
+    t.report_block(FB)
+    t.post(FB, data=form())
+    sessions.remove("fb")
+    t.post(FB, data=form())
+    last = made[-1].calls[-1] if made[-1].calls else made[0].calls[-1]
+    assert last[2]["data"]["av"] == "0" and not made[-1].cookies

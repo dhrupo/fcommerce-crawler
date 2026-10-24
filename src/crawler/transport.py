@@ -10,6 +10,7 @@ from curl_cffi.requests.exceptions import ConnectionError as CurlConnectionError
 from curl_cffi.requests.exceptions import Timeout as CurlTimeout
 
 from .config import Config
+from .outcomes import rate_limited
 from .sessions import SITES, SessionStore, site_of
 
 log = logging.getLogger(__name__)
@@ -18,7 +19,6 @@ TIMEOUT_SECONDS = 30
 FB_HOME = "https://www.facebook.com/"
 DTSG = re.compile(r'"DTSGInitialData",\[\],\{"token":"([^"]+)"')
 STALE_DTSG = '"error":1357004'
-RATE_LIMITED = '"code":1675004'
 DROPS = (CurlConnectionError, CurlTimeout)
 MIN_RATE = 0.25
 
@@ -84,10 +84,10 @@ class Transport:
         return self._session_for(url, self._limiter(url)).cookies.get(name)
 
     def mode_token(self, url: str) -> tuple[int, bool]:
-        """Take before a fetch: (mode generation, sent logged in). A block reported with an old generation is
+        """Take before a fetch: (mode generation, logged in now). A block reported with an old generation is
         ignored because another thread already acted on one."""
         limiter = self._limiter(url)
-        return limiter.generation, self._login_active(limiter)
+        return limiter.generation, self._logged_in_now(url, limiter)
 
     def force_login(self, url: str) -> bool:
         limiter, site = self._limiter(url), site_of(url)
@@ -100,14 +100,19 @@ class Transport:
     def report_block(self, url: str, token: tuple[int, bool] | None = None) -> str:
         """A site said "blocked": switch to the imported login ("login"), expire it ("expired"), or cool down."""
         limiter, site = self._limiter(url), site_of(url)
+        # How this thread's own last request to the host went out decides; the fetch that got blocked ran here.
+        if token is None:
+            sent_logged_in, slowed_down = self._login_active(limiter), False
+        else:
+            sent_logged_in, slowed_down = self._last_sent().get(host_key(url), (token[1], False))
         with limiter.lock:
-            if token is not None and token[0] != limiter.generation:
-                return limiter.last_report
             now = self._clock()
-            if now < limiter.blocked_until:
-                return limiter.last_report
-            sent_logged_in = token[1] if token is not None else limiter.login_until > now
-            if sent_logged_in:
+            if (token is not None and token[0] != limiter.generation) or now < limiter.blocked_until:
+                report = limiter.last_report
+                return "cooldown" if report == "expired" and not sent_logged_in else report
+            if sent_logged_in and slowed_down:
+                self._cool_down(limiter, "cooldown")
+            elif sent_logged_in:
                 self._sessions.mark_expired(site)
                 limiter.login_until = 0.0
                 self._cool_down(limiter, "expired")
@@ -126,27 +131,31 @@ class Transport:
         fills_identity = logged_in and method == "POST" and site_of(url) == "fb" and isinstance(kwargs.get("data"), dict)
         if fills_identity:
             kwargs["data"] = self._with_fb_identity(kwargs["data"], limiter)
-        response = self._send(method, url, limiter, kwargs)
+        response = self._send(method, url, limiter, kwargs, logged_in)
         if fills_identity and STALE_DTSG in response.text[:500]:
-            kwargs["data"] = self._with_fb_identity(kwargs["data"], limiter, refresh=True)
-            response = self._send(method, url, limiter, kwargs)
-        rate_limited = response.status_code == 429 or RATE_LIMITED in (response.text or "")[:2000]
-        if rate_limited and logged_in:
-            # "Slow down" is not a refused login: cool down and keep the session.
-            with limiter.lock:
-                if token[0] == limiter.generation:
-                    self._cool_down(limiter, "cooldown")
-        elif response.status_code == 429:
+            kwargs["data"] = self._with_fb_identity(kwargs["data"], limiter, stale=kwargs["data"]["fb_dtsg"])
+            response = self._send(method, url, limiter, kwargs, logged_in)
+        slowed_down = rate_limited(response)
+        self._last_sent()[host_key(url)] = (logged_in, slowed_down)
+        if slowed_down:
             self.report_block(url, token)
         else:
             self._note_success(limiter)
         return response
 
-    def _send(self, method: str, url: str, limiter: HostLimiter, kwargs: dict):
+    def _last_sent(self) -> dict:
+        return self._local.__dict__.setdefault("last_sent", {})
+
+    def _logged_in_now(self, url: str, limiter: HostLimiter) -> bool:
+        site = site_of(url)
+        return bool(site and self._login_active(limiter) and self._sessions and self._sessions.load(site))
+
+    def _send(self, method: str, url: str, limiter: HostLimiter, kwargs: dict, logged_in: bool):
         for attempt in (1, 2):
             self._wait_turn(url, limiter)
+            session = self._logged_in_session(url, limiter) if logged_in else self.session()
             try:
-                return self._session_for(url, limiter).request(method, url, **kwargs)
+                return session.request(method, url, **kwargs)
             except DROPS:
                 with limiter.lock:
                     self._back_off(limiter)
@@ -169,9 +178,10 @@ class Transport:
         limiter.last_report = report
 
     def _session_for(self, url: str, limiter: HostLimiter):
+        return self._logged_in_session(url, limiter) if self._logged_in_now(url, limiter) else self.session()
+
+    def _logged_in_session(self, url: str, limiter: HostLimiter):
         site = site_of(url)
-        if not (site and self._login_active(limiter)):
-            return self.session()
         cache = self._local.__dict__.setdefault("logged_in", {})
         key = (site, limiter.generation)
         if key not in cache:
@@ -185,17 +195,17 @@ class Transport:
             cache[key] = session
         return cache[key]
 
-    def _with_fb_identity(self, data: dict, limiter: HostLimiter, refresh=False) -> dict:
+    def _with_fb_identity(self, data: dict, limiter: HostLimiter, stale: str | None = None) -> dict:
+        """One home-page read per login window; a stale token is refetched once, by the first thread to see it."""
         user = (self._sessions.load("fb") or {}).get("c_user")
         with self._dtsg_lock:
-            if refresh or not self._dtsg or self._dtsg[0] != limiter.generation:
-                home = self._send("GET", FB_HOME, limiter, {"timeout": TIMEOUT_SECONDS})
+            cached = self._dtsg if self._dtsg and self._dtsg[0] == limiter.generation else None
+            if cached is None or (stale is not None and (cached[1] or "") == stale):
+                home = self._send("GET", FB_HOME, limiter, {"timeout": TIMEOUT_SECONDS}, True)
                 found = DTSG.search(home.text)
-                token = found.group(1) if found else None
-                self._dtsg = (limiter.generation, token) if token else None
-            else:
-                token = self._dtsg[1]
-        return {**data, "av": user, "__user": user, "fb_dtsg": token or ""}
+                cached = (limiter.generation, found.group(1) if found else None)
+                self._dtsg = cached
+        return {**data, "av": user, "__user": user, "fb_dtsg": cached[1] or ""}
 
     def _limiter(self, url: str) -> HostLimiter:
         key = host_key(url)
