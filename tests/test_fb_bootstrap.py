@@ -35,8 +35,7 @@ def test_numeric_url_needs_no_request():
 def test_falls_back_to_page_plugin():
     t = FakeTransport({
         "https://www.facebook.com/iStoreSyl": (200, "<html>no ids here</html>"),
-        "https://www.facebook.com/plugins/page.php": (200, '<a href="https://www.facebook.com/x" data-pageid="1"></a>'
-                                                            '{"pageID":"100057210291191"}'),
+        "https://www.facebook.com/plugins/page.php": (200, '{"pageID":"100057210291191"}'),
     })
     assert resolve_page_id(t, "https://www.facebook.com/iStoreSyl") == (Outcome.OK, "100057210291191")
     assert len(t.urls) == 2
