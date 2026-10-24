@@ -41,3 +41,17 @@ def test_every_record_has_contract_fields(tmp_path):
         assert FIELDS <= r.keys(), r
         assert set(r["changes"]) == {"new", "edited", "sold_changed"}
         assert r["schema_version"] == 1 and r["source"] and r["strategy"] and r["fetched_at"]
+
+
+def test_records_never_carry_a_post_author_id(tmp_path):
+    class GroupReader(Reader):
+        def posts(self, source, newest_seen):
+            return FetchResult(Outcome.OK, [{"item_id": "g1", "kind": "post", "created_at": NOW,
+                                             "author_id": "pfbidPRIVATEPERSON", "comment_count": 0}])
+
+    store = Store(tmp_path, clock=lambda: NOW)
+    store.add_source("https://www.facebook.com/groups/1/", "fb_group", "Sylhet", "phones")
+    events = list(search(Config(places=("Sylhet",)), store, "Sylhet", "phones", readers={"fb_group": GroupReader()},
+                         marketplace=marketplace, now=lambda: NOW))
+    assert "pfbidPRIVATEPERSON" not in str(events)
+    assert store.get_item(store.list_sources()[0].id, "g1")["author_id"] == "pfbidPRIVATEPERSON"

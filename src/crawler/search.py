@@ -38,7 +38,11 @@ def source_info(source: Source | None, place=None, category=None) -> dict:
 
 
 def record(item: dict, source: Source, strategy: str, fetched_at, changes=None) -> dict:
-    """One output row: the parsed item plus the fields every consumer can rely on."""
+    """One output row: the parsed item plus the fields every consumer can rely on.
+
+    author_id stays in the store for owner detection; in a group it is a private person, so it is never output.
+    """
+    item = {k: v for k, v in item.items() if k != "author_id"}
     return {**item, "schema_version": SCHEMA_VERSION, "source": source.url, "strategy": strategy,
             "parser_version": PARSER_VERSION, "fetched_at": fetched_at, "changes": changes or NO_CHANGES,
             "expired": bool(item.get("expired"))}
