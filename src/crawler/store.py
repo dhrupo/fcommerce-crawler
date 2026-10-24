@@ -93,11 +93,8 @@ class Store:
         rows = self._read("SELECT * FROM sources WHERE url = ?", (url,))
         return Source(**{k: rows[0][k] for k in Source.__annotations__}) if rows else None
 
-    def update_source(self, source_id, native_id=None, name=None) -> None:
-        self._write(
-            "UPDATE sources SET native_id = COALESCE(?, native_id), name = COALESCE(?, name) WHERE id = ?",
-            (native_id, name, source_id),
-        )
+    def update_source(self, source_id, native_id) -> None:
+        self._write("UPDATE sources SET native_id = ? WHERE id = ?", (native_id, source_id))
 
     def list_sources(self, place=None, category=None) -> list[Source]:
         sql, params = "SELECT * FROM sources WHERE 1=1", []
@@ -147,15 +144,9 @@ class Store:
             "sold_changed": sold is not None and row["sold"] is not None and row["sold"] != sold,
         }
 
-    def items_for(self, source_id, include_expired=False, since=None) -> list[dict]:
-        sql = "SELECT data, expired FROM items WHERE source_id = ?"
-        params = [source_id]
-        if not include_expired:
-            sql += " AND expired = 0"
-        if since is not None:
-            sql += " AND created_at > ?"
-            params.append(since)
-        rows = self._read(sql + " ORDER BY created_at DESC", params)
+    def items_for(self, source_id, include_expired=False) -> list[dict]:
+        sql = "SELECT data, expired FROM items WHERE source_id = ?" + ("" if include_expired else " AND expired = 0")
+        rows = self._read(sql + " ORDER BY created_at DESC", (source_id,))
         return [{**json.loads(r["data"]), "expired": bool(r["expired"])} for r in rows]
 
     def get_item(self, source_id, item_id) -> dict | None:

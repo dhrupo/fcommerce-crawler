@@ -1,6 +1,6 @@
 from collections import deque
 
-from ..outcomes import json_documents
+from ..outcomes import dig, json_documents
 
 SKIP_IN_POST = frozenset({"attached_story"})
 
@@ -115,9 +115,7 @@ def page_info(docs, connection: tuple[str, ...]) -> dict:
         if list(doc.get("path") or []) == list(connection) and isinstance(data, dict) and "page_info" in data:
             return data["page_info"] or {}
         if "path" not in doc:
-            node = data
-            for key in connection:
-                node = node.get(key) if isinstance(node, dict) else None
+            node = dig(data, connection)
             if isinstance(node, dict) and isinstance(node.get("page_info"), dict):
                 return node["page_info"]
     return {}
@@ -135,9 +133,9 @@ def connection_nodes(docs, connection: tuple[str, ...]) -> list[dict]:
         data = doc.get("data")
         path = list(doc.get("path") or [])
         if not path:
-            for key in connection:
-                data = data.get(key) if isinstance(data, dict) else None
-            nodes += [e.get("node") or {} for e in (data or {}).get("edges") or [] if isinstance(e, dict)]
+            conn = dig(data, connection)
+            nodes += [e.get("node") or {} for e in (conn if isinstance(conn, dict) else {}).get("edges") or []
+                      if isinstance(e, dict)]
         elif path[: len(connection) + 1] == [*connection, "edges"] and len(path) == len(connection) + 2:
             nodes.append((data or {}).get("node") or {})
     return nodes

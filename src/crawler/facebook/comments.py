@@ -77,38 +77,33 @@ class _Walker:
                     return outcome
         return Outcome.OK
 
-    def comments(self, feedback_id) -> Outcome:
+    def _pages(self, doc_key, friendly, connection, label, parent_id, variables_for) -> Outcome:
         cursor = None
         for _ in range(MAX_PAGES):
-            variables = {"commentsAfterCount": -1, "commentsAfterCursor": cursor, "commentsBeforeCount": None,
-                         "commentsBeforeCursor": None, "commentsIntentToken": "CHRONOLOGICAL_UNFILTERED_INTENT_V1",
-                         "feedLocation": "POST_PERMALINK_DIALOG", "focusCommentID": None, "scale": 2,
-                         "useDefaultActor": False, "id": feedback_id, **UFI_FLAGS}
-            outcome, docs = self._ask("fb_comments", "CommentsListComponentsPaginationQuery", variables,
-                                      COMMENTS, "comments")
+            outcome, docs = self._ask(doc_key, friendly, variables_for(cursor), connection, label)
             if outcome is Outcome.NOTHING_NEW:
                 return Outcome.OK
-            if outcome is not Outcome.OK or (outcome := self._take(docs, COMMENTS, None)) is not Outcome.OK:
+            if outcome is not Outcome.OK or (outcome := self._take(docs, connection, parent_id)) is not Outcome.OK:
                 return outcome
-            if not (cursor := next_cursor(docs, COMMENTS)):
+            if not (cursor := next_cursor(docs, connection)):
                 return Outcome.OK
         return Outcome.OK
 
+    def comments(self, feedback_id) -> Outcome:
+        return self._pages("fb_comments", "CommentsListComponentsPaginationQuery", COMMENTS, "comments", None,
+                           lambda cursor: {
+                               "commentsAfterCount": -1, "commentsAfterCursor": cursor, "commentsBeforeCount": None,
+                               "commentsBeforeCursor": None,
+                               "commentsIntentToken": "CHRONOLOGICAL_UNFILTERED_INTENT_V1",
+                               "feedLocation": "POST_PERMALINK_DIALOG", "focusCommentID": None, "scale": 2,
+                               "useDefaultActor": False, "id": feedback_id, **UFI_FLAGS})
+
     def replies(self, feedback_id, token, parent_id) -> Outcome:
-        cursor = None
-        for _ in range(MAX_PAGES):
-            variables = {"clientKey": None, "expansionToken": token, "feedLocation": "POST_PERMALINK_DIALOG",
-                         "focusCommentID": None, "scale": 2, "useDefaultActor": False, "id": feedback_id,
-                         "repliesAfterCursor": cursor, **UFI_FLAGS}
-            outcome, docs = self._ask("fb_replies", "Depth1CommentsListPaginationQuery", variables, REPLIES,
-                                      "replies")
-            if outcome is Outcome.NOTHING_NEW:
-                return Outcome.OK
-            if outcome is not Outcome.OK or (outcome := self._take(docs, REPLIES, parent_id)) is not Outcome.OK:
-                return outcome
-            if not (cursor := next_cursor(docs, REPLIES)):
-                return Outcome.OK
-        return Outcome.OK
+        return self._pages("fb_replies", "Depth1CommentsListPaginationQuery", REPLIES, "replies", parent_id,
+                           lambda cursor: {
+                               "clientKey": None, "expansionToken": token, "feedLocation": "POST_PERMALINK_DIALOG",
+                               "focusCommentID": None, "scale": 2, "useDefaultActor": False, "id": feedback_id,
+                               "repliesAfterCursor": cursor, **UFI_FLAGS})
 
 
 def fetch_comments(transport, config: Config, post: dict, owner_id: str | None, on_raw=None) -> FetchResult:
