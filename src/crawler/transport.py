@@ -18,6 +18,7 @@ TIMEOUT_SECONDS = 30
 FB_HOME = "https://www.facebook.com/"
 DTSG = re.compile(r'"DTSGInitialData",\[\],\{"token":"([^"]+)"')
 STALE_DTSG = '"error":1357004'
+RATE_LIMITED = '"code":1675004'
 DROPS = (CurlConnectionError, CurlTimeout)
 MIN_RATE = 0.25
 
@@ -82,9 +83,11 @@ class Transport:
     def cookie(self, url: str, name: str) -> str | None:
         return self._session_for(url, self._limiter(url)).cookies.get(name)
 
-    def mode_token(self, url: str) -> int:
-        """Take before a fetch; a block reported with it is ignored if another thread already acted on one."""
-        return self._limiter(url).generation
+    def mode_token(self, url: str) -> tuple[int, bool]:
+        """Take before a fetch: (mode generation, sent logged in). A block reported with an old generation is
+        ignored because another thread already acted on one."""
+        limiter = self._limiter(url)
+        return limiter.generation, self._login_active(limiter)
 
     def force_login(self, url: str) -> bool:
         limiter, site = self._limiter(url), site_of(url)
@@ -94,14 +97,17 @@ class Transport:
             self._start_login(limiter, site)
             return True
 
-    def report_block(self, url: str, token: int | None = None) -> str:
+    def report_block(self, url: str, token: tuple[int, bool] | None = None) -> str:
         """A site said "blocked": switch to the imported login ("login"), expire it ("expired"), or cool down."""
         limiter, site = self._limiter(url), site_of(url)
         with limiter.lock:
-            if token is not None and token != limiter.generation:
+            if token is not None and token[0] != limiter.generation:
                 return limiter.last_report
             now = self._clock()
-            if limiter.login_until > now:
+            if now < limiter.blocked_until:
+                return limiter.last_report
+            sent_logged_in = token[1] if token is not None else limiter.login_until > now
+            if sent_logged_in:
                 self._sessions.mark_expired(site)
                 limiter.login_until = 0.0
                 self._cool_down(limiter, "expired")
@@ -115,16 +121,22 @@ class Transport:
     def request(self, method: str, url: str, **kwargs):
         limiter = self._limiter(url)
         kwargs.setdefault("timeout", TIMEOUT_SECONDS)
-        token = limiter.generation
-        fills_identity = (self._login_active(limiter) and method == "POST" and site_of(url) == "fb"
-                          and isinstance(kwargs.get("data"), dict))
+        token = self.mode_token(url)
+        logged_in = token[1]
+        fills_identity = logged_in and method == "POST" and site_of(url) == "fb" and isinstance(kwargs.get("data"), dict)
         if fills_identity:
             kwargs["data"] = self._with_fb_identity(kwargs["data"], limiter)
         response = self._send(method, url, limiter, kwargs)
         if fills_identity and STALE_DTSG in response.text[:500]:
             kwargs["data"] = self._with_fb_identity(kwargs["data"], limiter, refresh=True)
             response = self._send(method, url, limiter, kwargs)
-        if response.status_code == 429:
+        rate_limited = response.status_code == 429 or RATE_LIMITED in (response.text or "")[:2000]
+        if rate_limited and logged_in:
+            # "Slow down" is not a refused login: cool down and keep the session.
+            with limiter.lock:
+                if token[0] == limiter.generation:
+                    self._cool_down(limiter, "cooldown")
+        elif response.status_code == 429:
             self.report_block(url, token)
         else:
             self._note_success(limiter)
@@ -163,6 +175,10 @@ class Transport:
         cache = self._local.__dict__.setdefault("logged_in", {})
         key = (site, limiter.generation)
         if key not in cache:
+            for old in [k for k in cache if k[0] == site]:
+                stale = cache.pop(old)
+                if hasattr(stale, "close"):
+                    stale.close()
             session = self._session_factory()
             for name, value in (self._sessions.load(site) or {}).items():
                 session.cookies.set(name, value, domain="." + SITES[site][0])
@@ -175,8 +191,10 @@ class Transport:
             if refresh or not self._dtsg or self._dtsg[0] != limiter.generation:
                 home = self._send("GET", FB_HOME, limiter, {"timeout": TIMEOUT_SECONDS})
                 found = DTSG.search(home.text)
-                self._dtsg = (limiter.generation, found.group(1) if found else None)
-            token = self._dtsg[1]
+                token = found.group(1) if found else None
+                self._dtsg = (limiter.generation, token) if token else None
+            else:
+                token = self._dtsg[1]
         return {**data, "av": user, "__user": user, "fb_dtsg": token or ""}
 
     def _limiter(self, url: str) -> HostLimiter:

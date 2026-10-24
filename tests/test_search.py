@@ -424,3 +424,12 @@ def test_page_id_lookup_block_uses_login_fallback(monkeypatch, tmp_path):
     reader = FacebookPageReader(CONFIG, FallbackTransport(["login"]), store, now=lambda: NOW)
     assert [p["item_id"] for p in reader.posts(src, None).items] == ["42"]
     assert store.get_source(src.url).native_id == "42"
+
+
+def test_comments_stop_after_login_expired(tmp_path):
+    reader = FakeReader(posts={"https://www.facebook.com/a": FetchResult(
+        Outcome.OK, [post("p1", comments=1), post("p2", comments=1)])},
+        comments={"p1": FetchResult(Outcome.LOGIN_EXPIRED, [], "refused")})
+    store, _ = setup(tmp_path, reader)
+    events = [e for e in run(store, reader) if e["phase"] == "comments"]
+    assert reader.comment_calls == ["p1"] and events[0]["outcome"] == "login_expired"

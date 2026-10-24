@@ -103,3 +103,25 @@ def test_site_comes_from_the_hostname():
     assert site_of("https://www.facebook.com/l.php?u=https://instagram.com/x") == "fb"
     assert site_of("https://www.instagram.com/api/graphql") == "ig"
     assert site_of("https://evil-facebook.com.example/") is None
+
+
+def test_null_domain_in_json_export_is_skipped(tmp_path):
+    export = json.dumps([{"name": "c_user", "value": "1", "domain": None},
+                         {"name": "c_user", "value": "1", "domain": ".facebook.com"},
+                         {"name": "xs", "value": "2", "domain": ".facebook.com"}])
+    SessionStore(tmp_path).import_export("fb", export)
+
+
+def test_failed_write_keeps_the_old_session(tmp_path, monkeypatch):
+    store = SessionStore(tmp_path)
+    store.import_export("fb", NETSCAPE)
+
+    def broken_dump(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(json, "dump", broken_dump)
+    with pytest.raises(OSError):
+        store.mark_in_use("fb", seconds=60)
+    monkeypatch.undo()
+    assert store.load("fb")["xs"] == "PLANTED-XS-VALUE"
+    assert [p.name for p in (tmp_path / "sessions").iterdir()] == ["fb.json"]

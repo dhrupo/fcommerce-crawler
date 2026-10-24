@@ -168,7 +168,7 @@ class _SourceJob:
                 self.store.set_comments_read(self.source.id, post["item_id"], post.get("comment_count"))
             if got.outcome not in FETCHED:
                 outcome, detail = got.outcome, got.detail
-                if got.outcome is Outcome.BLOCKED:
+                if got.outcome in (Outcome.BLOCKED, Outcome.LOGIN_EXPIRED):
                     break
             elif got.outcome is Outcome.OK and outcome is Outcome.NOTHING_NEW:
                 outcome = Outcome.OK

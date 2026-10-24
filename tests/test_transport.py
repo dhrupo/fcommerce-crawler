@@ -332,3 +332,91 @@ def test_in_use_shows_with_real_clocks(tmp_path):
                   sessions=sessions)
     t.report_block(FB)
     assert sessions.state("fb") == "in use"
+
+
+def test_rate_limit_while_logged_in_cools_down_without_expiring(tmp_path):
+    replies = iter([SimpleNamespace(status_code=429, text="", url=FB),
+                    SimpleNamespace(status_code=200, url=FB,
+                                    text='{"errors":[{"code":1675004,"summary":"Rate limit exceeded"}]}')])
+
+    def handler(session, method, url, kwargs):
+        if method == "GET":
+            return SimpleNamespace(status_code=200, url=url, text=HOME)
+        return next(replies)
+
+    t, _, clock, sessions = login_transport(tmp_path, handler)
+    t.report_block(FB)
+    token = t.mode_token(FB)
+    t.post(FB, data=form())
+    assert t.report_block(FB, token) == "cooldown" and sessions.state("fb") != "expired"
+    clock.now += t.cooldown_seconds + 1
+    t.report_block(FB)
+    token = t.mode_token(FB)
+    t.post(FB, data=form())
+    assert t.report_block(FB, token) == "cooldown" and sessions.state("fb") != "expired"
+
+
+def test_missing_fb_dtsg_is_not_cached(tmp_path):
+    pages = iter(["<html>checkpoint</html>", HOME])
+
+    def handler(session, method, url, kwargs):
+        if method == "GET":
+            return SimpleNamespace(status_code=200, url=url, text=next(pages))
+        return SimpleNamespace(status_code=200, url=url, text="{}")
+
+    t, made, _, _ = login_transport(tmp_path, handler)
+    t.report_block(FB)
+    t.post(FB, data=form())
+    t.post(FB, data=form())
+    posts = [c for c in made[0].calls if c[0] == "POST"]
+    assert [p[2]["data"]["fb_dtsg"] for p in posts] == ["", "DTSG1"]
+
+
+def test_refusal_of_a_logged_in_request_after_the_window_expires_the_login(tmp_path):
+    t, _, clock, sessions = login_transport(tmp_path)
+    t.report_block(FB)
+    token = t.mode_token(FB)
+    clock.now += t.login_seconds + 1
+    assert t.report_block(FB, token) == "expired" and sessions.state("fb") == "expired"
+
+
+def test_logged_out_request_after_the_window_does_not_expire(tmp_path):
+    t, _, clock, sessions = login_transport(tmp_path)
+    t.report_block(FB)
+    clock.now += t.login_seconds + 1
+    t.post(FB, data=form())
+    token = t.mode_token(FB)
+    assert t.report_block(FB, token) == "login" and sessions.state("fb") == "in use"
+
+
+def test_block_report_during_a_cooldown_does_not_extend_it(tmp_path):
+    t, _, clock, _ = login_transport(tmp_path, with_session=False)
+    t.report_block(FB)
+    first_until = t._limiter(FB).blocked_until
+    clock.now += 10
+    t.report_block(FB, t.mode_token(FB))
+    assert t._limiter(FB).blocked_until == first_until
+    assert spacing_after_cooldown(t, clock) == pytest.approx(1.0)
+
+
+def spacing_after_cooldown(t, clock):
+    clock.now = t._limiter(FB).blocked_until + 1
+    return spacing(t, clock, FB)
+
+
+def test_old_logged_in_sessions_are_dropped(tmp_path):
+    t, _, clock, _ = login_transport(tmp_path)
+    for _ in range(3):
+        t.report_block(FB)
+        t.post(FB, data=form())
+        clock.now += t.login_seconds + 1
+    assert len(t._local.logged_in) == 1
+
+
+def test_late_refusal_of_a_logged_in_request_still_expires_the_login(tmp_path):
+    t, _, clock, sessions = login_transport(tmp_path)
+    t.report_block(FB)
+    in_flight = t.mode_token(FB)
+    clock.now += t.login_seconds + 1
+    t.post(FB, data=form())  # a later, logged-out request
+    assert t.report_block(FB, in_flight) == "expired" and sessions.state("fb") == "expired"

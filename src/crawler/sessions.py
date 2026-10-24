@@ -29,7 +29,7 @@ def read_cookie_export(text: str) -> list[dict]:
     if isinstance(data, dict):
         data = data.get("cookies")
     if isinstance(data, list):
-        return [{"name": c["name"], "value": c["value"], "domain": c.get("domain", "")}
+        return [{"name": c["name"], "value": c["value"], "domain": c.get("domain") or ""}
                 for c in data if isinstance(c, dict) and c.get("name") and "value" in c]
     cookies = []
     for line in text.splitlines():
@@ -64,10 +64,16 @@ class SessionStore:
         self.dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.dir, 0o700)
         path = self._path(site)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            json.dump(record, f)
-        os.chmod(path, 0o600)
+        tmp = path.with_suffix(".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(record, f)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
         return path
 
     def import_export(self, site: str, text: str) -> Path:
